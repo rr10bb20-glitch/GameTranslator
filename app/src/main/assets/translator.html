@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
+  <title>مترجم الألعاب</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=IBM+Plex+Arabic:wght@300;400;600&display=swap" rel="stylesheet"/>
+  <style>
+    /* ─── Reset ─────────────────────────────────────── */
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+    :root{
+      --bg0:#020710;
+      --bg1:#050d1e;
+      --bg2:#071228;
+      --bg3:#0a1833;
+      --c1:#1a3870;
+      --c2:#2a5090;
+      --accent:#3d8bff;
+      --accent2:#00c8ff;
+      --text:#ccdaff;
+      --dim:#4a6a9a;
+      --success:#00e676;
+      --danger:#ff4060;
+      --warn:#ffa040;
+      --r:14px;
+    }
+
+    html,body{
+      background:var(--bg0);
+      color:var(--text);
+      font-family:'IBM Plex Arabic',system-ui,sans-serif;
+      min-height:100vh;
+      overflow-x:hidden;
+    }
+
+    /* ─── Grid background ───────────────────────────── */
+    body::before{
+      content:'';position:fixed;inset:0;
+      background-image:
+        linear-gradient(rgba(26,56,112,0.06) 1px,transparent 1px),
+        linear-gradient(90deg,rgba(26,56,112,0.06) 1px,transparent 1px);
+      background-size:48px 48px;
+      pointer-events:none;z-index:0;
+    }
+    body>*{position:relative;z-index:1}
+
+    /* ─── Header ────────────────────────────────────── */
+    .hd{
+      background:linear-gradient(160deg,#030f28 0%,#071830 60%,#0b2040 100%);
+      border-bottom:1px solid var(--c1);
+      padding:28px 20px 22px;
+      text-align:center;
+      overflow:hidden;
+      position:relative;
+    }
+    .hd::before{
+      content:'';position:absolute;inset:0;
+      background:radial-gradient(ellipse 90% 70% at 50% -10%,rgba(40,100,220,0.28),transparent 65%);
+      pointer-events:none;
+    }
+
+    .logo{
+      font-family:'Orbitron',sans-serif;
+      font-size:20px;font-weight:900;
+      letter-spacing:3px;
+      background:linear-gradient(100deg,var(--accent),var(--accent2));
+      -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+      background-clip:text;
+    }
+    .logo-icon{font-size:38px;display:block;animation:float 3s ease-in-out infinite;margin-bottom:4px}
+    @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
+
+    .logo-sub{
+      font-size:10px;color:var(--dim);
+      letter-spacing:4px;margin-top:5px;
+      font-family:'Orbitron',sans-serif;text-transform:uppercase;
+    }
+
+    .status-row{
+      display:flex;align-items:center;justify-content:center;
+      gap:8px;margin-top:14px;font-size:12px;color:#5a8aa0;
+    }
+    .dot-live{
+      width:8px;height:8px;border-radius:50%;
+      background:var(--success);box-shadow:0 0 8px var(--success);
+      animation:blink 1.8s ease-in-out infinite;
+    }
+    @keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
+
+    /* ─── Layout ────────────────────────────────────── */
+    .wrap{padding:14px 12px 80px}
+
+    .card{
+      background:rgba(5,12,30,0.96);
+      border:1px solid var(--c1);
+      border-radius:var(--r);
+      padding:16px;
+      margin-bottom:14px;
+      position:relative;overflow:hidden;
+      animation:up 0.35s ease both;
+    }
+    .card::before{
+      content:'';position:absolute;top:0;left:0;right:0;height:1px;
+      background:linear-gradient(90deg,transparent,var(--c2),transparent);
+    }
+    .card:nth-child(1){animation-delay:.04s}
+    .card:nth-child(2){animation-delay:.09s}
+    .card:nth-child(3){animation-delay:.14s}
+    .card:nth-child(4){animation-delay:.19s}
+    @keyframes up{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+    .card-ttl{
+      font-size:10px;color:var(--dim);
+      letter-spacing:2.5px;text-transform:uppercase;
+      margin-bottom:14px;
+      display:flex;align-items:center;gap:8px;
+    }
+    .card-ttl::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--c1),transparent)}
+
+    /* ─── Language pair ─────────────────────────────── */
+    .lang-row{display:flex;align-items:center;gap:10px}
+    select{
+      flex:1;background:var(--bg2);border:1px solid var(--c1);
+      border-radius:10px;color:var(--text);
+      font-family:'IBM Plex Arabic',sans-serif;font-size:13px;
+      padding:10px 12px;outline:none;cursor:pointer;
+      -webkit-appearance:none;appearance:none;
+    }
+    select:focus{border-color:var(--accent)}
+
+    .swap{
+      width:38px;height:38px;border-radius:50%;flex-shrink:0;
+      background:var(--c1);border:1px solid var(--c2);
+      color:var(--accent2);font-size:18px;
+      display:flex;align-items:center;justify-content:center;
+      cursor:pointer;transition:all .2s;
+    }
+    .swap:active{transform:rotate(180deg) scale(0.9)}
+
+    .save-btn{
+      display:block;width:100%;margin-top:12px;padding:11px;
+      background:linear-gradient(135deg,var(--c1),var(--c2));
+      border:none;border-radius:10px;
+      color:#c0d8ff;
+      font-family:'IBM Plex Arabic',sans-serif;font-size:13px;font-weight:600;
+      cursor:pointer;letter-spacing:1px;transition:.2s;
+    }
+    .save-btn:active{opacity:.8}
+
+    /* ─── Translate area ────────────────────────────── */
+    .paste-row{display:flex;gap:8px;margin-bottom:10px}
+    textarea{
+      flex:1;background:var(--bg2);border:1px solid var(--c1);
+      border-radius:10px;color:var(--text);
+      font-family:'IBM Plex Arabic',sans-serif;font-size:14px;
+      padding:12px;resize:none;outline:none;
+      height:88px;line-height:1.6;
+    }
+    textarea:focus{border-color:var(--accent)}
+    textarea::placeholder{color:var(--dim)}
+
+    .paste-btn{
+      background:var(--bg3);border:1px solid var(--c1);
+      border-radius:10px;color:var(--dim);
+      font-size:20px;width:44px;
+      display:flex;align-items:center;justify-content:center;
+      cursor:pointer;flex-shrink:0;transition:.2s;
+      align-self:stretch;
+    }
+    .paste-btn:active{background:var(--c1)}
+
+    .trans-btn{
+      display:block;width:100%;padding:13px;
+      background:linear-gradient(135deg,#1050b0,#2060d0);
+      border:1px solid var(--accent);border-radius:10px;
+      color:#fff;
+      font-family:'IBM Plex Arabic',sans-serif;font-size:15px;font-weight:600;
+      cursor:pointer;letter-spacing:.5px;
+      box-shadow:0 0 22px rgba(48,120,255,.28);
+      transition:.2s;
+    }
+    .trans-btn:active{opacity:.85;transform:scale(.99)}
+    .trans-btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+
+    .result{
+      background:var(--bg2);border:1px solid var(--c1);
+      border-radius:10px;padding:12px;
+      min-height:58px;font-size:17px;line-height:1.7;
+      color:#e0ecff;font-weight:600;direction:rtl;
+      margin-top:10px;display:none;
+    }
+    .result.show{display:block}
+    .result-meta{font-size:10px;color:var(--dim);margin-top:6px;letter-spacing:.5px}
+
+    /* ─── Steps ─────────────────────────────────────── */
+    .step{
+      display:flex;gap:14px;align-items:flex-start;
+      padding:12px 0;border-bottom:1px solid rgba(26,56,112,.35);
+    }
+    .step:last-child{border-bottom:none;padding-bottom:0}
+    .snum{
+      width:32px;height:32px;border-radius:50%;flex-shrink:0;
+      background:linear-gradient(135deg,var(--c1),var(--c2));
+      border:1px solid var(--c2);
+      display:flex;align-items:center;justify-content:center;
+      font-family:'Orbitron',sans-serif;font-size:11px;font-weight:700;
+      color:var(--accent2);
+    }
+    .stxt{flex:1;font-size:13px;line-height:1.75;color:#8aA8d0}
+    .stxt strong{color:var(--text);font-size:14px;display:block;margin-bottom:2px}
+
+    /* ─── Tips ──────────────────────────────────────── */
+    .tip{
+      background:rgba(8,18,46,.8);
+      border:1px solid var(--c1);
+      border-right:3px solid var(--accent);
+      border-radius:8px;padding:10px 14px;
+      margin-bottom:8px;font-size:12px;color:#7a9ac0;line-height:1.65;
+    }
+    .tip:last-child{margin-bottom:0}
+    .tip strong{color:var(--accent2)}
+
+    /* ─── Toast ─────────────────────────────────────── */
+    #toast{
+      position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+      background:rgba(8,18,50,.97);border:1px solid var(--accent);
+      border-radius:20px;padding:10px 22px;
+      font-size:13px;color:var(--text);z-index:999;
+      opacity:0;transition:opacity .3s;white-space:nowrap;
+      pointer-events:none;
+    }
+    #toast.show{opacity:1}
+
+    /* ─── Loading spinner ───────────────────────────── */
+    .spin{
+      display:inline-block;width:16px;height:16px;
+      border:2px solid rgba(255,255,255,.2);
+      border-top-color:#fff;border-radius:50%;
+      animation:spin .75s linear infinite;vertical-align:middle;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* ─── Copy result button ────────────────────────── */
+    .result-actions{display:none;gap:8px;margin-top:8px}
+    .result-actions.show{display:flex}
+    .copy-btn{
+      flex:1;padding:9px;border-radius:8px;
+      background:var(--c1);border:1px solid var(--c2);
+      color:var(--accent2);font-family:'IBM Plex Arabic',sans-serif;
+      font-size:12px;font-weight:600;cursor:pointer;
+      letter-spacing:.5px;transition:.2s;
+    }
+    .copy-btn:active{background:var(--c2)}
+
+    /* ─── Footer ────────────────────────────────────── */
+    .foot{
+      text-align:center;padding:20px;
+      font-size:10px;color:var(--dim);letter-spacing:1px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══ Header ═══════════════════════════════════════════ -->
+<header class="hd">
+  <div class="logo">
+    <span class="logo-icon">🌐</span>
+    GAME TRANSLATOR
+  </div>
+  <div class="logo-sub">مترجم الألعاب الاحترافي</div>
+  <div class="status-row">
+    <div class="dot-live"></div>
+    الخدمة تعمل فوق كل التطبيقات
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ══ Language Settings ═══════════════════════════════ -->
+  <div class="card">
+    <div class="card-ttl">⚙ إعداد اللغة</div>
+    <div class="lang-row">
+      <select id="fromLang">
+        <option value="auto">🔍 تلقائي</option>
+        <option value="en">🇺🇸 الإنجليزية</option>
+        <option value="ja">🇯🇵 اليابانية</option>
+        <option value="ko">🇰🇷 الكورية</option>
+        <option value="zh">🇨🇳 الصينية</option>
+        <option value="fr">🇫🇷 الفرنسية</option>
+        <option value="de">🇩🇪 الألمانية</option>
+        <option value="es">🇪🇸 الإسبانية</option>
+        <option value="ru">🇷🇺 الروسية</option>
+        <option value="tr">🇹🇷 التركية</option>
+        <option value="it">🇮🇹 الإيطالية</option>
+        <option value="pt">🇧🇷 البرتغالية</option>
+        <option value="hi">🇮🇳 الهندية</option>
+        <option value="ar">🇸🇦 العربية</option>
+      </select>
+      <div class="swap" onclick="swapLangs()" title="عكس">⇄</div>
+      <select id="toLang">
+        <option value="ar" selected>🇸🇦 العربية</option>
+        <option value="en">🇺🇸 الإنجليزية</option>
+        <option value="ja">🇯🇵 اليابانية</option>
+        <option value="ko">🇰🇷 الكورية</option>
+        <option value="zh">🇨🇳 الصينية</option>
+        <option value="fr">🇫🇷 الفرنسية</option>
+        <option value="de">🇩🇪 الألمانية</option>
+        <option value="es">🇪🇸 الإسبانية</option>
+        <option value="ru">🇷🇺 الروسية</option>
+        <option value="tr">🇹🇷 التركية</option>
+        <option value="it">🇮🇹 الإيطالية</option>
+        <option value="pt">🇧🇷 البرتغالية</option>
+        <option value="hi">🇮🇳 الهندية</option>
+      </select>
+    </div>
+    <button class="save-btn" onclick="saveLangs()">💾 حفظ الإعدادات</button>
+  </div>
+
+  <!-- ══ Manual Translate ═════════════════════════════════ -->
+  <div class="card">
+    <div class="card-ttl">⚡ ترجمة سريعة</div>
+    <div class="paste-row">
+      <textarea id="inputText" placeholder="اكتب أو الصق النص هنا…" dir="auto"></textarea>
+      <div class="paste-btn" onclick="pasteClip()" title="لصق من الحافظة">📋</div>
+    </div>
+    <button class="trans-btn" id="transBtn" onclick="translateNow()">🌐 ترجم الآن</button>
+    <div class="result" id="resultBox" dir="rtl"></div>
+    <div class="result-meta" id="resultMeta"></div>
+    <div class="result-actions" id="resultActions">
+      <button class="copy-btn" onclick="copyResult()">📋 نسخ الترجمة</button>
+    </div>
+  </div>
+
+  <!-- ══ How to Use ════════════════════════════════════════ -->
+  <div class="card">
+    <div class="card-ttl">📖 كيف تستخدم التطبيق</div>
+
+    <div class="step">
+      <div class="snum">1</div>
+      <div class="stxt">
+        <strong>افتح أي لعبة أو تطبيق</strong>
+        الزر 🌐 يظهر فوق كل شيء — اسحبه لأي مكان تريده على الشاشة
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="snum">2</div>
+      <div class="stxt">
+        <strong>انسخ النص (تحديد + نسخ)</strong>
+        حدد النص في اللعبة أو التطبيق أو الموقع واضغط نسخ — يدعم كل مصدر
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="snum">3</div>
+      <div class="stxt">
+        <strong>اضغط الزر 🌐 مرة واحدة</strong>
+        تظهر اللوحة الشفافة أسفل الشاشة فوراً مع الترجمة الكاملة
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="snum">4</div>
+      <div class="stxt">
+        <strong>🤖 AUTO MODE — الترجمة التلقائية</strong>
+        اضغط الزر 🌐 ضغطاً <em style="color:#ffa040">طويلاً</em> (0.7 ثانية) لتفعيل الوضع التلقائي — أي نص تنسخه يُترجم تلقائياً دون أي ضغط إضافي
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ Tips ══════════════════════════════════════════════ -->
+  <div class="card">
+    <div class="card-ttl">💡 نصائح احترافية</div>
+    <div class="tip"><strong>⇕ حجم اللوحة</strong> — اضغط ⇕ على اللوحة للتبديل بين 3 أحجام: صغير (سطر) / متوسط / كبير (8 أسطر)</div>
+    <div class="tip"><strong>⚙ تغيير اللغة أثناء اللعب</strong> — اضغط ⚙ على اللوحة مباشرة لتغيير اللغة دون الرجوع للتطبيق</div>
+    <div class="tip"><strong>✕ إغلاق اللوحة</strong> — اضغط ✕ أو اضغط الزر 🌐 مرة ثانية — اللوحة تختفي تلقائياً بعد 10 ثوانٍ</div>
+    <div class="tip"><strong>🔍 اللغة التلقائية</strong> — إذا ما تعرف لغة النص، اختر "تلقائي" وسيكتشفها Google Translate تلقائياً</div>
+    <div class="tip"><strong>⬤ AUTO شارة خضراء</strong> — عند تفعيل AUTO MODE تظهر نقطة خضراء على الزر وشارة AUTO على اللوحة — اضغطها لإيقاف الوضع التلقائي</div>
+  </div>
+
+</div><!-- /wrap -->
+
+<div class="foot">مترجم الألعاب v5 • يعمل فوق كل التطبيقات والألعاب</div>
+<div id="toast"></div>
+
+<script>
+/* ── Android bridge ──────────────────────────────── */
+const AB = window.AndroidClipboard || null;
+
+/* ── Load saved lang on start ────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  if (!AB) return;
+  const f = AB.getFromLang();
+  const t = AB.getToLang();
+  if (f) document.getElementById('fromLang').value = f;
+  if (t) document.getElementById('toLang').value   = t;
+});
+
+/* ── Swap languages ──────────────────────────────── */
+function swapLangs() {
+  const f = document.getElementById('fromLang');
+  const t = document.getElementById('toLang');
+  if (t.value === 'auto') return;
+  const tmp = f.value;
+  f.value = t.value;
+  t.value = (tmp === 'auto') ? 'en' : tmp;
+}
+
+/* ── Save to SharedPreferences via bridge ────────── */
+function saveLangs() {
+  const f = document.getElementById('fromLang').value;
+  const t = document.getElementById('toLang').value;
+  if (f !== 'auto' && f === t) { showToast('⚠ لغتا المصدر والهدف متطابقتان'); return; }
+  if (AB) AB.saveLanguages(f, t);
+  showToast('✓ تم حفظ الإعدادات');
+}
+
+/* ── Paste from device clipboard ─────────────────── */
+function pasteClip() {
+  if (AB) {
+    const txt = AB.getText();
+    if (txt && txt.trim()) {
+      document.getElementById('inputText').value = txt;
+      showToast('✓ تم اللصق');
+    } else {
+      showToast('الحافظة فارغة');
+    }
+  } else {
+    navigator.clipboard && navigator.clipboard.readText().then(t => {
+      document.getElementById('inputText').value = t;
+    }).catch(() => showToast('تعذّر الوصول للحافظة'));
+  }
+}
+
+/* ── Manual translate ────────────────────────────── */
+async function translateNow() {
+  const text = document.getElementById('inputText').value.trim();
+  if (!text) { showToast('⚠ أدخل نصاً أولاً'); return; }
+
+  const btn     = document.getElementById('transBtn');
+  const box     = document.getElementById('resultBox');
+  const meta    = document.getElementById('resultMeta');
+  const actions = document.getElementById('resultActions');
+
+  const from = document.getElementById('fromLang').value;
+  const to   = document.getElementById('toLang').value;
+
+  btn.innerHTML = '<span class="spin"></span> جاري الترجمة…';
+  btn.disabled  = true;
+  box.classList.remove('show');
+  actions.classList.remove('show');
+  box.style.color = '#e0ecff';
+
+  try {
+    const t0     = Date.now();
+    const result = await gtranslate(text, from, to);
+    const ms     = Date.now() - t0;
+
+    box.textContent = result;
+    box.classList.add('show');
+    actions.classList.add('show');
+    meta.textContent = `⏱ ${(ms/1000).toFixed(1)}ث  •  ${text.length} حرف  •  Google Translate`;
+
+    if (AB) AB.setText(result);   // نسخ الترجمة للحافظة تلقائياً
+  } catch(err) {
+    box.textContent = '⚠ خطأ في الترجمة: ' + err.message;
+    box.classList.add('show');
+    box.style.color = '#ff4060';
+  } finally {
+    btn.innerHTML = '🌐 ترجم الآن';
+    btn.disabled  = false;
+  }
+}
+
+/* ── Google Translate (gtx — no API key) ─────────── */
+async function gtranslate(text, from, to) {
+  if (text.length > 1000) text = text.slice(0, 1000);
+  const q   = encodeURIComponent(text);
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from}&tl=${to}&dt=t&q=${q}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  return data[0].map(p => (p && p[0]) ? p[0] : '').join('').trim();
+}
+
+/* ── Copy translation result ─────────────────────── */
+function copyResult() {
+  const text = document.getElementById('resultBox').textContent.trim();
+  if (!text) return;
+  if (AB) {
+    AB.setText(text);
+    showToast('✓ تم نسخ الترجمة');
+  } else {
+    navigator.clipboard && navigator.clipboard.writeText(text)
+      .then(() => showToast('✓ تم نسخ الترجمة'))
+      .catch(() => showToast('تعذّر النسخ'));
+  }
+}
+
+/* ── Toast ───────────────────────────────────────── */
+let _toastTimer;
+function showToast(msg, ms=2200) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove('show'), ms);
+}
+</script>
+</body>
+</html>

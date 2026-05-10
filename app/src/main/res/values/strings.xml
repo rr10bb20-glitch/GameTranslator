@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">مترجم الألعاب</string>
+    <string name="overlay_permission_msg">يحتاج التطبيق إذن العرض فوق التطبيقات الأخرى للزر العائم</string>
+    <string name="service_running">خدمة الترجمة تعمل في الخلفية</string>
+    <string name="auto_mode_on">AUTO MODE مفعّل — سيترجم تلقائياً عند النسخ</string>
+    <string name="auto_mode_off">AUTO MODE معطّل</string>
+    <string name="long_press_hint">ضغط طويل = AUTO MODE  •  ضغط قصير = ترجمة</string>
+</resources>

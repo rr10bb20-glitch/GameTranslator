@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:padding="6dp">
+
+    <!--
+        الزر العائم الشفاف
+        ─────────────────
+        شفافية عالية حتى لا يعيق اللعب
+        ويتضح عند التمرير فوقه
+    -->
+    <FrameLayout
+        android:id="@+id/btnBg"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:background="@drawable/floating_btn_bg"
+        android:alpha="0.72"
+        android:elevation="8dp">
+
+        <TextView
+            android:id="@+id/btnText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="⚡"
+            android:textSize="22sp"
+            android:includeFontPadding="false" />
+
+    </FrameLayout>
+
+</FrameLayout>
