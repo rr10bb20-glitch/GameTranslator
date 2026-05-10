@@ -19,6 +19,8 @@ jobs:
           distribution: 'temurin'
 
       - name: Build Debug APK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
         run: ./gradlew assembleDebug
 
       - name: Upload APK
