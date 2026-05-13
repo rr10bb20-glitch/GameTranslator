@@ -3,31 +3,64 @@ name: Build APK
 on:
   push:
     branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type'
+        required: true
+        default: 'debug'
+        type: choice
+        options: [ debug, release ]
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
 
       - name: Grant execute permission
         run: chmod +x gradlew
 
-      - name: Build Debug APK
+      - name: Build APK
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
-        run: ./gradlew assembleDebug
+        run: |
+          TYPE=${{ github.event.inputs.build_type || 'debug' }}
+          ./gradlew assemble$(echo $TYPE | sed 's/.*/\u&/') \
+            --no-daemon \
+            --build-cache \
+            --parallel
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GameTranslator-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: GameTranslator-${{ github.event.inputs.build_type || 'debug' }}-${{ github.run_number }}
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 14
