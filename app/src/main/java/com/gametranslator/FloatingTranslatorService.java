@@ -51,23 +51,23 @@ import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 
 /**
- * FloatingTranslatorService — v9
+ * FloatingTranslatorService \u2014 v9
  *
- * التغييرات الجوهرية عن v8:
- * ─────────────────────────────────────────────────────
- * ✅ OCR هو الافتراضي دائماً — لا fallback للحافظة
- * ✅ إذا mediaProjection == null: يطلب من المستخدم إعادة فتح التطبيق (لا حافظة)
- * ✅ MediaProjection لا يُعاد إنشاؤه — يُستقبل مرة واحدة ويبقى
- * ✅ foregroundServiceType="mediaProjection" في Manifest — مطلوب Android 10+
- * ✅ Overlay خفيف شفاف أسفل الشاشة فقط
- * ✅ لا WebView، لا Clipboard، لا activity_main
- * ✅ AUTO MODE يراقب الحافظة اختياريًا (ضغط طويل)
- * ─────────────────────────────────────────────────────
+ * \u0627\u0644\u062A\u063A\u064A\u064A\u0631\u0627\u062A \u0627\u0644\u062C\u0648\u0647\u0631\u064A\u0629 \u0639\u0646 v8:
+ * \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+ * \u2705 OCR \u0647\u0648 \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A \u062F\u0627\u0626\u0645\u0627\u064B \u2014 \u0644\u0627 fallback \u0644\u0644\u062D\u0627\u0641\u0638\u0629
+ * \u2705 \u0625\u0630\u0627 mediaProjection == null: \u064A\u0637\u0644\u0628 \u0645\u0646 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0625\u0639\u0627\u062F\u0629 \u0641\u062A\u062D \u0627\u0644\u062A\u0637\u0628\u064A\u0642 (\u0644\u0627 \u062D\u0627\u0641\u0638\u0629)
+ * \u2705 MediaProjection \u0644\u0627 \u064A\u064F\u0639\u0627\u062F \u0625\u0646\u0634\u0627\u0624\u0647 \u2014 \u064A\u064F\u0633\u062A\u0642\u0628\u0644 \u0645\u0631\u0629 \u0648\u0627\u062D\u062F\u0629 \u0648\u064A\u0628\u0642\u0649
+ * \u2705 foregroundServiceType="mediaProjection" \u0641\u064A Manifest \u2014 \u0645\u0637\u0644\u0648\u0628 Android 10+
+ * \u2705 Overlay \u062E\u0641\u064A\u0641 \u0634\u0641\u0627\u0641 \u0623\u0633\u0641\u0644 \u0627\u0644\u0634\u0627\u0634\u0629 \u0641\u0642\u0637
+ * \u2705 \u0644\u0627 WebView\u060C \u0644\u0627 Clipboard\u060C \u0644\u0627 activity_main
+ * \u2705 AUTO MODE \u064A\u0631\u0627\u0642\u0628 \u0627\u0644\u062D\u0627\u0641\u0638\u0629 \u0627\u062E\u062A\u064A\u0627\u0631\u064A\u064B\u0627 (\u0636\u063A\u0637 \u0637\u0648\u064A\u0644)
+ * \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
  *
- * تفاعلات الزر العائم:
- *   نقرة واحدة  → OCR مباشر من الشاشة
- *   نقرتان      → اختيار اللغة
- *   ضغط طويل   → AUTO MODE (مراقبة الحافظة)
+ * \u062A\u0641\u0627\u0639\u0644\u0627\u062A \u0627\u0644\u0632\u0631 \u0627\u0644\u0639\u0627\u0626\u0645:
+ *   \u0646\u0642\u0631\u0629 \u0648\u0627\u062D\u062F\u0629  \u2192 OCR \u0645\u0628\u0627\u0634\u0631 \u0645\u0646 \u0627\u0644\u0634\u0627\u0634\u0629
+ *   \u0646\u0642\u0631\u062A\u0627\u0646      \u2192 \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0644\u0644\u063A\u0629
+ *   \u0636\u063A\u0637 \u0637\u0648\u064A\u0644   \u2192 AUTO MODE (\u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062D\u0627\u0641\u0638\u0629)
  */
 public class FloatingTranslatorService extends Service {
 
@@ -75,169 +75,169 @@ public class FloatingTranslatorService extends Service {
     private static final String CHANNEL_ID = "gt_v9";
     private static final int    NOTIF_ID   = 1;
 
-    // ثوابت التوقيت
-    private static final long DISMISS_MS  = 10_000; // إخفاء النتيجة بعد 10 ثانية
-    private static final long LONG_MS     = 700;    // ضغط طويل
-    private static final long DOUBLE_MS   = 350;    // نقرتان
+    // \u062B\u0648\u0627\u0628\u062A \u0627\u0644\u062A\u0648\u0642\u064A\u062A
+    private static final long DISMISS_MS  = 10_000; // \u0625\u062E\u0641\u0627\u0621 \u0627\u0644\u0646\u062A\u064A\u062C\u0629 \u0628\u0639\u062F 10 \u062B\u0627\u0646\u064A\u0629
+    private static final long LONG_MS     = 700;    // \u0636\u063A\u0637 \u0637\u0648\u064A\u0644
+    private static final long DOUBLE_MS   = 350;    // \u0646\u0642\u0631\u062A\u0627\u0646
 
-    // شفافية الزر
+    // \u0634\u0641\u0627\u0641\u064A\u0629 \u0627\u0644\u0632\u0631
     private static final float ALPHA_IDLE = 0.40f;
     private static final float ALPHA_BUSY = 0.95f;
 
-    // جميع لغات العالم المدعومة في Google Translate (130+ لغة)
+    // \u062C\u0645\u064A\u0639 \u0644\u063A\u0627\u062A \u0627\u0644\u0639\u0627\u0644\u0645 \u0627\u0644\u0645\u062F\u0639\u0648\u0645\u0629 \u0641\u064A Google Translate (130+ \u0644\u063A\u0629)
     private static final String[][] LANGS = {
-        {"auto","Auto Detect","🔍"},
-        // ── Most Used ──
-        {"ar","Arabic","🇸🇦"},
-        {"en","English","🇺🇸"},
-        {"ja","Japanese","🇯🇵"},
-        {"ko","Korean","🇰🇷"},
-        {"zh-CN","Chinese (Simplified)","🇨🇳"},
-        {"zh-TW","Chinese (Traditional)","🇹🇼"},
-        {"fr","French","🇫🇷"},
-        {"de","German","🇩🇪"},
-        {"es","Spanish","🇪🇸"},
-        {"ru","Russian","🇷🇺"},
-        {"tr","Turkish","🇹🇷"},
-        {"it","Italian","🇮🇹"},
-        {"pt","Portuguese","🇧🇷"},
-        {"hi","Hindi","🇮🇳"},
-        // ── Europe ──
-        {"af","Afrikaans","🇿🇦"},
-        {"sq","Albanian","🇦🇱"},
-        {"hy","Armenian","🇦🇲"},
-        {"az","Azerbaijani","🇦🇿"},
-        {"eu","Basque","🏴"},
-        {"be","Belarusian","🇧🇾"},
-        {"bs","Bosnian","🇧🇦"},
-        {"bg","Bulgarian","🇧🇬"},
-        {"ca","Catalan","🏴"},
-        {"hr","Croatian","🇭🇷"},
-        {"cs","Czech","🇨🇿"},
-        {"da","Danish","🇩🇰"},
-        {"nl","Dutch","🇳🇱"},
-        {"et","Estonian","🇪🇪"},
-        {"fi","Finnish","🇫🇮"},
-        {"gl","Galician","🏴"},
-        {"ka","Georgian","🇬🇪"},
-        {"el","Greek","🇬🇷"},
-        {"hu","Hungarian","🇭🇺"},
-        {"is","Icelandic","🇮🇸"},
-        {"ga","Irish","🇮🇪"},
-        {"lv","Latvian","🇱🇻"},
-        {"lt","Lithuanian","🇱🇹"},
-        {"lb","Luxembourgish","🇱🇺"},
-        {"mk","Macedonian","🇲🇰"},
-        {"mt","Maltese","🇲🇹"},
-        {"no","Norwegian","🇳🇴"},
-        {"pl","Polish","🇵🇱"},
-        {"ro","Romanian","🇷🇴"},
-        {"sr","Serbian","🇷🇸"},
-        {"sk","Slovak","🇸🇰"},
-        {"sl","Slovenian","🇸🇮"},
-        {"sv","Swedish","🇸🇪"},
-        {"uk","Ukrainian","🇺🇦"},
-        {"cy","Welsh","🏴󠁧󠁢󠁷󠁬󠁳󠁿"},
-        {"fy","Frisian","🇳🇱"},
-        {"co","Corsican","🇫🇷"},
-        {"br","Breton","🇫🇷"},
-        {"gd","Scots Gaelic","🏴󠁧󠁢󠁳󠁣󠁴󠁿"},
-        {"oc","Occitan","🏴"},
-        {"la","Latin","🏛️"},
-        {"eo","Esperanto","🌍"},
-        // ── Asia ──
-        {"bn","Bengali","🇧🇩"},
-        {"my","Burmese","🇲🇲"},
-        {"ceb","Cebuano","🇵🇭"},
-        {"gu","Gujarati","🇮🇳"},
-        {"hmn","Hmong","🏳️"},
-        {"id","Indonesian","🇮🇩"},
-        {"jw","Javanese","🇮🇩"},
-        {"kn","Kannada","🇮🇳"},
-        {"kk","Kazakh","🇰🇿"},
-        {"km","Khmer","🇰🇭"},
-        {"ky","Kyrgyz","🇰🇬"},
-        {"lo","Lao","🇱🇦"},
-        {"ms","Malay","🇲🇾"},
-        {"ml","Malayalam","🇮🇳"},
-        {"mr","Marathi","🇮🇳"},
-        {"mn","Mongolian","🇲🇳"},
-        {"ne","Nepali","🇳🇵"},
-        {"or","Odia","🇮🇳"},
-        {"pa","Punjabi","🇮🇳"},
-        {"si","Sinhala","🇱🇰"},
-        {"su","Sundanese","🇮🇩"},
-        {"tg","Tajik","🇹🇯"},
-        {"ta","Tamil","🇮🇳"},
-        {"te","Telugu","🇮🇳"},
-        {"th","Thai","🇹🇭"},
-        {"tl","Filipino","🇵🇭"},
-        {"tk","Turkmen","🇹🇲"},
-        {"ug","Uyghur","🏳️"},
-        {"ur","Urdu","🇵🇰"},
-        {"uz","Uzbek","🇺🇿"},
-        {"vi","Vietnamese","🇻🇳"},
-        {"tt","Tatar","🇷🇺"},
-        // ── Middle East ──
-        {"fa","Persian","🇮🇷"},
-        {"he","Hebrew","🇮🇱"},
-        {"ku","Kurdish","🏳️"},
-        {"ps","Pashto","🇦🇫"},
-        {"sd","Sindhi","🇵🇰"},
-        {"yi","Yiddish","✡️"},
-        // ── Africa ──
-        {"am","Amharic","🇪🇹"},
-        {"ha","Hausa","🇳🇬"},
-        {"ig","Igbo","🇳🇬"},
-        {"rw","Kinyarwanda","🇷🇼"},
-        {"mg","Malagasy","🇲🇬"},
-        {"ny","Chichewa","🇲🇼"},
-        {"om","Oromo","🇪🇹"},
-        {"sn","Shona","🇿🇼"},
-        {"so","Somali","🇸🇴"},
-        {"st","Sesotho","🇱🇸"},
-        {"sw","Swahili","🇰🇪"},
-        {"ti","Tigrinya","🇪🇷"},
-        {"xh","Xhosa","🇿🇦"},
-        {"yo","Yoruba","🇳🇬"},
-        {"zu","Zulu","🇿🇦"},
-        {"ee","Ewe","🇬🇭"},
-        {"lg","Luganda","🇺🇬"},
-        {"ln","Lingala","🇨🇩"},
-        {"bm","Bambara","🇲🇱"},
-        {"wo","Wolof","🇸🇳"},
-        // ── Latin America ──
-        {"ht","Haitian Creole","🇭🇹"},
-        {"qu","Quechua","🇵🇪"},
-        {"gn","Guarani","🇵🇾"},
-        {"ay","Aymara","🇧🇴"},
-        // ── Pacific ──
-        {"haw","Hawaiian","🌺"},
-        {"mi","Maori","🇳🇿"},
-        {"sm","Samoan","🇼🇸"},
+        {"auto","Auto Detect","\uD83D\uDD0D"},
+        // \u2500\u2500 Most Used \u2500\u2500
+        {"ar","Arabic","\uD83C\uDDF8\uD83C\uDDE6"},
+        {"en","English","\uD83C\uDDFA\uD83C\uDDF8"},
+        {"ja","Japanese","\uD83C\uDDEF\uD83C\uDDF5"},
+        {"ko","Korean","\uD83C\uDDF0\uD83C\uDDF7"},
+        {"zh-CN","Chinese (Simplified)","\uD83C\uDDE8\uD83C\uDDF3"},
+        {"zh-TW","Chinese (Traditional)","\uD83C\uDDF9\uD83C\uDDFC"},
+        {"fr","French","\uD83C\uDDEB\uD83C\uDDF7"},
+        {"de","German","\uD83C\uDDE9\uD83C\uDDEA"},
+        {"es","Spanish","\uD83C\uDDEA\uD83C\uDDF8"},
+        {"ru","Russian","\uD83C\uDDF7\uD83C\uDDFA"},
+        {"tr","Turkish","\uD83C\uDDF9\uD83C\uDDF7"},
+        {"it","Italian","\uD83C\uDDEE\uD83C\uDDF9"},
+        {"pt","Portuguese","\uD83C\uDDE7\uD83C\uDDF7"},
+        {"hi","Hindi","\uD83C\uDDEE\uD83C\uDDF3"},
+        // \u2500\u2500 Europe \u2500\u2500
+        {"af","Afrikaans","\uD83C\uDDFF\uD83C\uDDE6"},
+        {"sq","Albanian","\uD83C\uDDE6\uD83C\uDDF1"},
+        {"hy","Armenian","\uD83C\uDDE6\uD83C\uDDF2"},
+        {"az","Azerbaijani","\uD83C\uDDE6\uD83C\uDDFF"},
+        {"eu","Basque","\uD83C\uDFF4"},
+        {"be","Belarusian","\uD83C\uDDE7\uD83C\uDDFE"},
+        {"bs","Bosnian","\uD83C\uDDE7\uD83C\uDDE6"},
+        {"bg","Bulgarian","\uD83C\uDDE7\uD83C\uDDEC"},
+        {"ca","Catalan","\uD83C\uDFF4"},
+        {"hr","Croatian","\uD83C\uDDED\uD83C\uDDF7"},
+        {"cs","Czech","\uD83C\uDDE8\uD83C\uDDFF"},
+        {"da","Danish","\uD83C\uDDE9\uD83C\uDDF0"},
+        {"nl","Dutch","\uD83C\uDDF3\uD83C\uDDF1"},
+        {"et","Estonian","\uD83C\uDDEA\uD83C\uDDEA"},
+        {"fi","Finnish","\uD83C\uDDEB\uD83C\uDDEE"},
+        {"gl","Galician","\uD83C\uDFF4"},
+        {"ka","Georgian","\uD83C\uDDEC\uD83C\uDDEA"},
+        {"el","Greek","\uD83C\uDDEC\uD83C\uDDF7"},
+        {"hu","Hungarian","\uD83C\uDDED\uD83C\uDDFA"},
+        {"is","Icelandic","\uD83C\uDDEE\uD83C\uDDF8"},
+        {"ga","Irish","\uD83C\uDDEE\uD83C\uDDEA"},
+        {"lv","Latvian","\uD83C\uDDF1\uD83C\uDDFB"},
+        {"lt","Lithuanian","\uD83C\uDDF1\uD83C\uDDF9"},
+        {"lb","Luxembourgish","\uD83C\uDDF1\uD83C\uDDFA"},
+        {"mk","Macedonian","\uD83C\uDDF2\uD83C\uDDF0"},
+        {"mt","Maltese","\uD83C\uDDF2\uD83C\uDDF9"},
+        {"no","Norwegian","\uD83C\uDDF3\uD83C\uDDF4"},
+        {"pl","Polish","\uD83C\uDDF5\uD83C\uDDF1"},
+        {"ro","Romanian","\uD83C\uDDF7\uD83C\uDDF4"},
+        {"sr","Serbian","\uD83C\uDDF7\uD83C\uDDF8"},
+        {"sk","Slovak","\uD83C\uDDF8\uD83C\uDDF0"},
+        {"sl","Slovenian","\uD83C\uDDF8\uD83C\uDDEE"},
+        {"sv","Swedish","\uD83C\uDDF8\uD83C\uDDEA"},
+        {"uk","Ukrainian","\uD83C\uDDFA\uD83C\uDDE6"},
+        {"cy","Welsh","\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC77\uDB40\uDC6C\uDB40\uDC73\uDB40\uDC7F"},
+        {"fy","Frisian","\uD83C\uDDF3\uD83C\uDDF1"},
+        {"co","Corsican","\uD83C\uDDEB\uD83C\uDDF7"},
+        {"br","Breton","\uD83C\uDDEB\uD83C\uDDF7"},
+        {"gd","Scots Gaelic","\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC73\uDB40\uDC63\uDB40\uDC74\uDB40\uDC7F"},
+        {"oc","Occitan","\uD83C\uDFF4"},
+        {"la","Latin","\uD83C\uDFDB\uFE0F"},
+        {"eo","Esperanto","\uD83C\uDF0D"},
+        // \u2500\u2500 Asia \u2500\u2500
+        {"bn","Bengali","\uD83C\uDDE7\uD83C\uDDE9"},
+        {"my","Burmese","\uD83C\uDDF2\uD83C\uDDF2"},
+        {"ceb","Cebuano","\uD83C\uDDF5\uD83C\uDDED"},
+        {"gu","Gujarati","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"hmn","Hmong","\uD83C\uDFF3\uFE0F"},
+        {"id","Indonesian","\uD83C\uDDEE\uD83C\uDDE9"},
+        {"jw","Javanese","\uD83C\uDDEE\uD83C\uDDE9"},
+        {"kn","Kannada","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"kk","Kazakh","\uD83C\uDDF0\uD83C\uDDFF"},
+        {"km","Khmer","\uD83C\uDDF0\uD83C\uDDED"},
+        {"ky","Kyrgyz","\uD83C\uDDF0\uD83C\uDDEC"},
+        {"lo","Lao","\uD83C\uDDF1\uD83C\uDDE6"},
+        {"ms","Malay","\uD83C\uDDF2\uD83C\uDDFE"},
+        {"ml","Malayalam","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"mr","Marathi","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"mn","Mongolian","\uD83C\uDDF2\uD83C\uDDF3"},
+        {"ne","Nepali","\uD83C\uDDF3\uD83C\uDDF5"},
+        {"or","Odia","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"pa","Punjabi","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"si","Sinhala","\uD83C\uDDF1\uD83C\uDDF0"},
+        {"su","Sundanese","\uD83C\uDDEE\uD83C\uDDE9"},
+        {"tg","Tajik","\uD83C\uDDF9\uD83C\uDDEF"},
+        {"ta","Tamil","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"te","Telugu","\uD83C\uDDEE\uD83C\uDDF3"},
+        {"th","Thai","\uD83C\uDDF9\uD83C\uDDED"},
+        {"tl","Filipino","\uD83C\uDDF5\uD83C\uDDED"},
+        {"tk","Turkmen","\uD83C\uDDF9\uD83C\uDDF2"},
+        {"ug","Uyghur","\uD83C\uDFF3\uFE0F"},
+        {"ur","Urdu","\uD83C\uDDF5\uD83C\uDDF0"},
+        {"uz","Uzbek","\uD83C\uDDFA\uD83C\uDDFF"},
+        {"vi","Vietnamese","\uD83C\uDDFB\uD83C\uDDF3"},
+        {"tt","Tatar","\uD83C\uDDF7\uD83C\uDDFA"},
+        // \u2500\u2500 Middle East \u2500\u2500
+        {"fa","Persian","\uD83C\uDDEE\uD83C\uDDF7"},
+        {"he","Hebrew","\uD83C\uDDEE\uD83C\uDDF1"},
+        {"ku","Kurdish","\uD83C\uDFF3\uFE0F"},
+        {"ps","Pashto","\uD83C\uDDE6\uD83C\uDDEB"},
+        {"sd","Sindhi","\uD83C\uDDF5\uD83C\uDDF0"},
+        {"yi","Yiddish","\u2721\uFE0F"},
+        // \u2500\u2500 Africa \u2500\u2500
+        {"am","Amharic","\uD83C\uDDEA\uD83C\uDDF9"},
+        {"ha","Hausa","\uD83C\uDDF3\uD83C\uDDEC"},
+        {"ig","Igbo","\uD83C\uDDF3\uD83C\uDDEC"},
+        {"rw","Kinyarwanda","\uD83C\uDDF7\uD83C\uDDFC"},
+        {"mg","Malagasy","\uD83C\uDDF2\uD83C\uDDEC"},
+        {"ny","Chichewa","\uD83C\uDDF2\uD83C\uDDFC"},
+        {"om","Oromo","\uD83C\uDDEA\uD83C\uDDF9"},
+        {"sn","Shona","\uD83C\uDDFF\uD83C\uDDFC"},
+        {"so","Somali","\uD83C\uDDF8\uD83C\uDDF4"},
+        {"st","Sesotho","\uD83C\uDDF1\uD83C\uDDF8"},
+        {"sw","Swahili","\uD83C\uDDF0\uD83C\uDDEA"},
+        {"ti","Tigrinya","\uD83C\uDDEA\uD83C\uDDF7"},
+        {"xh","Xhosa","\uD83C\uDDFF\uD83C\uDDE6"},
+        {"yo","Yoruba","\uD83C\uDDF3\uD83C\uDDEC"},
+        {"zu","Zulu","\uD83C\uDDFF\uD83C\uDDE6"},
+        {"ee","Ewe","\uD83C\uDDEC\uD83C\uDDED"},
+        {"lg","Luganda","\uD83C\uDDFA\uD83C\uDDEC"},
+        {"ln","Lingala","\uD83C\uDDE8\uD83C\uDDE9"},
+        {"bm","Bambara","\uD83C\uDDF2\uD83C\uDDF1"},
+        {"wo","Wolof","\uD83C\uDDF8\uD83C\uDDF3"},
+        // \u2500\u2500 Latin America \u2500\u2500
+        {"ht","Haitian Creole","\uD83C\uDDED\uD83C\uDDF9"},
+        {"qu","Quechua","\uD83C\uDDF5\uD83C\uDDEA"},
+        {"gn","Guarani","\uD83C\uDDF5\uD83C\uDDFE"},
+        {"ay","Aymara","\uD83C\uDDE7\uD83C\uDDF4"},
+        // \u2500\u2500 Pacific \u2500\u2500
+        {"haw","Hawaiian","\uD83C\uDF3A"},
+        {"mi","Maori","\uD83C\uDDF3\uD83C\uDDFF"},
+        {"sm","Samoan","\uD83C\uDDFC\uD83C\uDDF8"},
     };
 
-    // ═══ WindowManager & أبعاد الشاشة ═══
+    // \u2550\u2550\u2550 WindowManager & \u0623\u0628\u0639\u0627\u062F \u0627\u0644\u0634\u0627\u0634\u0629 \u2550\u2550\u2550
     private WindowManager wm;
-    private int SW, SH; // عرض وارتفاع الشاشة بـ px
+    private int SW, SH; // \u0639\u0631\u0636 \u0648\u0627\u0631\u062A\u0641\u0627\u0639 \u0627\u0644\u0634\u0627\u0634\u0629 \u0628\u0640 px
 
     private final Handler H = new Handler(Looper.getMainLooper());
 
-    // ═══ Views ═══
+    // \u2550\u2550\u2550 Views \u2550\u2550\u2550
     private View     btnView;
     private View     overlayView;
     private View     pickerView;
     private WindowManager.LayoutParams btnLP, overlayLP, pickerLP;
     private GradientDrawable btnCircleBg;
 
-    // مراجع مباشرة للـ TextViews داخل الـ Overlay
+    // \u0645\u0631\u0627\u062C\u0639 \u0645\u0628\u0627\u0634\u0631\u0629 \u0644\u0644\u0640 TextViews \u062F\u0627\u062E\u0644 \u0627\u0644\u0640 Overlay
     private TextView tvBtnIcon;
     private View     autoDot;
     private TextView tvTranslation;
     private TextView tvOriginal;
     private TextView tvLangBar;
 
-    // ═══ الحالة ═══
+    // \u2550\u2550\u2550 \u0627\u0644\u062D\u0627\u0644\u0629 \u2550\u2550\u2550
     private boolean overlayVisible = false;
     private boolean autoMode       = false;
     private boolean translating    = false;
@@ -248,27 +248,27 @@ public class FloatingTranslatorService extends Service {
     private String toLang   = "ar";
     private String pickerFrom = "auto";
 
-    // ═══ Clipboard (AUTO MODE فقط) ═══
+    // \u2550\u2550\u2550 Clipboard (AUTO MODE \u0641\u0642\u0637) \u2550\u2550\u2550
     private android.content.ClipboardManager clipMgr;
     private android.content.ClipboardManager.OnPrimaryClipChangedListener clipCb;
     private String lastClipHash = "";
 
-    // ═══ MediaProjection & OCR ═══
+    // \u2550\u2550\u2550 MediaProjection & OCR \u2550\u2550\u2550
     private MediaProjection        mediaProjection;
     private MediaProjectionManager mpManager;
-    private TextRecognizer         recognizerJa;   // يابانية / كورية / صينية
-    private TextRecognizer         recognizerLat;  // لاتينية / عربية / روسية / الخ
+    private TextRecognizer         recognizerJa;   // \u064A\u0627\u0628\u0627\u0646\u064A\u0629 / \u0643\u0648\u0631\u064A\u0629 / \u0635\u064A\u0646\u064A\u0629
+    private TextRecognizer         recognizerLat;  // \u0644\u0627\u062A\u064A\u0646\u064A\u0629 / \u0639\u0631\u0628\u064A\u0629 / \u0631\u0648\u0633\u064A\u0629 / \u0627\u0644\u062E
 
-    // ═══ Timers ═══
+    // \u2550\u2550\u2550 Timers \u2550\u2550\u2550
     private Runnable dismissR;
     private Runnable doubleTapCheck;
     private Runnable pulseR;
     private boolean  pulseState = false;
     private int      tapCount   = 0;
 
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     // onCreate
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     @Override
     public void onCreate() {
         super.onCreate();
@@ -278,7 +278,7 @@ public class FloatingTranslatorService extends Service {
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         clipMgr = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
 
-        // قياس الشاشة
+        // \u0642\u064A\u0627\u0633 \u0627\u0644\u0634\u0627\u0634\u0629
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             android.graphics.Rect bounds = wm.getCurrentWindowMetrics().getBounds();
             SW = bounds.width();
@@ -290,15 +290,15 @@ public class FloatingTranslatorService extends Service {
             SH = dm.heightPixels;
         }
 
-        // قراءة اللغة المحفوظة
+        // \u0642\u0631\u0627\u0621\u0629 \u0627\u0644\u0644\u063A\u0629 \u0627\u0644\u0645\u062D\u0641\u0648\u0638\u0629
         fromLang = ClipboardBridge.readFromLang(this);
         toLang   = ClipboardBridge.readToLang(this);
 
-        // تهيئة OCR
+        // \u062A\u0647\u064A\u0626\u0629 OCR
         try {
             recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
             recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            Log.d(TAG, "OCR recognizers initialized ✓");
+            Log.d(TAG, "OCR recognizers initialized \u2713");
         } catch (Exception e) {
             Log.e(TAG, "OCR init failed: " + e.getMessage());
             recognizerJa  = null;
@@ -311,9 +311,9 @@ public class FloatingTranslatorService extends Service {
         buildOverlay();
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // onStartCommand — استقبال MediaProjection من MainActivity
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // onStartCommand \u2014 \u0627\u0633\u062A\u0642\u0628\u0627\u0644 MediaProjection \u0645\u0646 MainActivity
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && intent.hasExtra("mp_result_code")) {
@@ -321,23 +321,23 @@ public class FloatingTranslatorService extends Service {
             Intent data = intent.getParcelableExtra("mp_data");
 
             if (rc == android.app.Activity.RESULT_OK && data != null) {
-                // أوقف القديم لو موجود
+                // \u0623\u0648\u0642\u0641 \u0627\u0644\u0642\u062F\u064A\u0645 \u0644\u0648 \u0645\u0648\u062C\u0648\u062F
                 if (mediaProjection != null) {
                     try { mediaProjection.stop(); } catch (Exception ignored) {}
                     mediaProjection = null;
                 }
                 try {
                     mediaProjection = mpManager.getMediaProjection(rc, data);
-                    Log.d(TAG, "MediaProjection created ✓ — OCR جاهز");
+                    Log.d(TAG, "MediaProjection created \u2713 \u2014 OCR \u062C\u0627\u0647\u0632");
 
-                    // عند إنهاء MediaProjection (مثلاً المستخدم يسحب الإذن)
+                    // \u0639\u0646\u062F \u0625\u0646\u0647\u0627\u0621 MediaProjection (\u0645\u062B\u0644\u0627\u064B \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u0633\u062D\u0628 \u0627\u0644\u0625\u0630\u0646)
                     mediaProjection.registerCallback(new MediaProjection.Callback() {
                         @Override
                         public void onStop() {
                             Log.w(TAG, "MediaProjection stopped by system");
                             mediaProjection = null;
                             H.post(() -> {
-                                if (tvBtnIcon != null) tvBtnIcon.setText("🌐");
+                                if (tvBtnIcon != null) tvBtnIcon.setText("\uD83C\uDF10");
                                 ocrBusy = false;
                                 animateBtnPulse(false);
                             });
@@ -357,9 +357,9 @@ public class FloatingTranslatorService extends Service {
 
     @Override public IBinder onBind(Intent i) { return null; }
 
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     // onDestroy
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     @Override
     public void onDestroy() {
         Log.d(TAG, "onDestroy");
@@ -377,9 +377,9 @@ public class FloatingTranslatorService extends Service {
         safeRemove(pickerView);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // بناء الزر العائم
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0628\u0646\u0627\u0621 \u0627\u0644\u0632\u0631 \u0627\u0644\u0639\u0627\u0626\u0645
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void buildButton() {
         FrameLayout root   = new FrameLayout(this);
         FrameLayout circle = new FrameLayout(this);
@@ -397,13 +397,13 @@ public class FloatingTranslatorService extends Service {
         btnCircleBg = bg;
 
         tvBtnIcon = new TextView(this);
-        tvBtnIcon.setText("🌐");
+        tvBtnIcon.setText("\uD83C\uDF10");
         tvBtnIcon.setTextSize(22f);
         tvBtnIcon.setGravity(Gravity.CENTER);
         tvBtnIcon.setIncludeFontPadding(false);
         circle.addView(tvBtnIcon, matchParentFLP());
 
-        // نقطة خضراء — تظهر فقط في AUTO MODE
+        // \u0646\u0642\u0637\u0629 \u062E\u0636\u0631\u0627\u0621 \u2014 \u062A\u0638\u0647\u0631 \u0641\u0642\u0637 \u0641\u064A AUTO MODE
         autoDot = new View(this);
         int dotSz = dp(9);
         FrameLayout.LayoutParams dotLp = new FrameLayout.LayoutParams(dotSz, dotSz);
@@ -434,10 +434,10 @@ public class FloatingTranslatorService extends Service {
         wm.addView(btnView, btnLP);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // بناء الـ Overlay (نتيجة الترجمة)
-    // الـ Overlay خفيف، شفاف، أسفل الشاشة، لا يمنع اللمس
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0628\u0646\u0627\u0621 \u0627\u0644\u0640 Overlay (\u0646\u062A\u064A\u062C\u0629 \u0627\u0644\u062A\u0631\u062C\u0645\u0629)
+    // \u0627\u0644\u0640 Overlay \u062E\u0641\u064A\u0641\u060C \u0634\u0641\u0627\u0641\u060C \u0623\u0633\u0641\u0644 \u0627\u0644\u0634\u0627\u0634\u0629\u060C \u0644\u0627 \u064A\u0645\u0646\u0639 \u0627\u0644\u0644\u0645\u0633
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void buildOverlay() {
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
@@ -454,7 +454,7 @@ public class FloatingTranslatorService extends Service {
         cardBg.setStroke(dp(1), Color.parseColor("#1e3566"));
         card.setBackground(cardBg);
 
-        // شريط اللغة
+        // \u0634\u0631\u064A\u0637 \u0627\u0644\u0644\u063A\u0629
         tvLangBar = new TextView(this);
         tvLangBar.setText(pairText());
         tvLangBar.setTextColor(Color.parseColor("#4a6a9a"));
@@ -464,14 +464,14 @@ public class FloatingTranslatorService extends Service {
         tvLangBar.setPadding(0, 0, 0, dp(4));
         card.addView(tvLangBar);
 
-        // خط فاصل
+        // \u062E\u0637 \u0641\u0627\u0635\u0644
         View div = new View(this);
         LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
         divLp.setMargins(0, 0, 0, dp(6));
         div.setBackgroundColor(Color.parseColor("#121e40"));
         card.addView(div, divLp);
 
-        // النص الأصلي (مختصر)
+        // \u0627\u0644\u0646\u0635 \u0627\u0644\u0623\u0635\u0644\u064A (\u0645\u062E\u062A\u0635\u0631)
         tvOriginal = new TextView(this);
         tvOriginal.setTextColor(Color.parseColor("#2e4466"));
         tvOriginal.setTextSize(10f);
@@ -480,9 +480,9 @@ public class FloatingTranslatorService extends Service {
         tvOriginal.setPadding(0, 0, 0, dp(4));
         card.addView(tvOriginal);
 
-        // نص الترجمة (الرئيسي)
+        // \u0646\u0635 \u0627\u0644\u062A\u0631\u062C\u0645\u0629 (\u0627\u0644\u0631\u0626\u064A\u0633\u064A)
         tvTranslation = new TextView(this);
-        tvTranslation.setText("اضغط الزر للترجمة 🌐");
+        tvTranslation.setText("\u0627\u0636\u063A\u0637 \u0627\u0644\u0632\u0631 \u0644\u0644\u062A\u0631\u062C\u0645\u0629 \uD83C\uDF10");
         tvTranslation.setTextColor(Color.parseColor("#364a70"));
         tvTranslation.setTextSize(19f);
         tvTranslation.setTypeface(Typeface.DEFAULT_BOLD);
@@ -493,9 +493,9 @@ public class FloatingTranslatorService extends Service {
         tvTranslation.setEllipsize(android.text.TextUtils.TruncateAt.END);
         card.addView(tvTranslation);
 
-        // تلميح
+        // \u062A\u0644\u0645\u064A\u062D
         TextView hint = new TextView(this);
-        hint.setText("⏱ يختفي بعد 10 ث  •  اضغط 🌐 للإغلاق");
+        hint.setText("\u23F1 \u064A\u062E\u062A\u0641\u064A \u0628\u0639\u062F 10 \u062B  \u2022  \u0627\u0636\u063A\u0637 \uD83C\uDF10 \u0644\u0644\u0625\u063A\u0644\u0627\u0642");
         hint.setTextColor(Color.parseColor("#1e3050"));
         hint.setTextSize(8f);
         hint.setPadding(0, dp(6), 0, 0);
@@ -509,7 +509,7 @@ public class FloatingTranslatorService extends Service {
             SW, wc(), overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, // لا يمنع اللعب
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, // \u0644\u0627 \u064A\u0645\u0646\u0639 \u0627\u0644\u0644\u0639\u0628
             PixelFormat.TRANSLUCENT
         );
         overlayLP.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
@@ -540,9 +540,9 @@ public class FloatingTranslatorService extends Service {
         if (dismissR != null) { H.removeCallbacks(dismissR); dismissR = null; }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // Pulse Animation للزر أثناء OCR
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // Pulse Animation \u0644\u0644\u0632\u0631 \u0623\u062B\u0646\u0627\u0621 OCR
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void animateBtnPulse(boolean start) {
         if (pulseR != null) { H.removeCallbacks(pulseR); pulseR = null; }
         if (!start) {
@@ -563,9 +563,9 @@ public class FloatingTranslatorService extends Service {
         H.post(pulseR);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // AUTO MODE — مراقبة الحافظة (اختياري، ضغط طويل)
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // AUTO MODE \u2014 \u0645\u0631\u0627\u0642\u0628\u0629 \u0627\u0644\u062D\u0627\u0641\u0638\u0629 (\u0627\u062E\u062A\u064A\u0627\u0631\u064A\u060C \u0636\u063A\u0637 \u0637\u0648\u064A\u0644)
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void startAuto() {
         if (autoMode) return;
         autoMode = true;
@@ -581,7 +581,7 @@ public class FloatingTranslatorService extends Service {
             }
         });
         clipMgr.addPrimaryClipChangedListener(clipCb);
-        Toast.makeText(this, "✓ AUTO — كل نص تنسخه يُترجم تلقائياً", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "\u2713 AUTO \u2014 \u0643\u0644 \u0646\u0635 \u062A\u0646\u0633\u062E\u0647 \u064A\u064F\u062A\u0631\u062C\u0645 \u062A\u0644\u0642\u0627\u0626\u064A\u0627\u064B", Toast.LENGTH_SHORT).show();
     }
 
     private void stopAuto() {
@@ -594,48 +594,48 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // OCR — القلب الرئيسي للتطبيق
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // OCR \u2014 \u0627\u0644\u0642\u0644\u0628 \u0627\u0644\u0631\u0626\u064A\u0633\u064A \u0644\u0644\u062A\u0637\u0628\u064A\u0642
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void doOCR() {
         if (ocrBusy) {
             Log.d(TAG, "OCR already busy, skipping");
             return;
         }
 
-        // ─── التحقق من توفر MediaProjection ───
+        // \u2500\u2500\u2500 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u062A\u0648\u0641\u0631 MediaProjection \u2500\u2500\u2500
         if (mediaProjection == null) {
-            Log.w(TAG, "mediaProjection is null — asking user to reopen app");
+            Log.w(TAG, "mediaProjection is null \u2014 asking user to reopen app");
             Toast.makeText(this,
-                "⚠ يحتاج إعادة إذن تصوير الشاشة\nافتح التطبيق مجدداً وامنح الإذن",
+                "\u26A0 \u064A\u062D\u062A\u0627\u062C \u0625\u0639\u0627\u062F\u0629 \u0625\u0630\u0646 \u062A\u0635\u0648\u064A\u0631 \u0627\u0644\u0634\u0627\u0634\u0629\n\u0627\u0641\u062A\u062D \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0645\u062C\u062F\u062F\u0627\u064B \u0648\u0627\u0645\u0646\u062D \u0627\u0644\u0625\u0630\u0646",
                 Toast.LENGTH_LONG).show();
-            // افتح MainActivity لإعادة طلب الإذن
+            // \u0627\u0641\u062A\u062D MainActivity \u0644\u0625\u0639\u0627\u062F\u0629 \u0637\u0644\u0628 \u0627\u0644\u0625\u0630\u0646
             Intent reopen = new Intent(this, MainActivity.class);
             reopen.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
             startActivity(reopen);
             return;
         }
 
-        // ─── التحقق من توفر OCR ───
+        // \u2500\u2500\u2500 \u0627\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u062A\u0648\u0641\u0631 OCR \u2500\u2500\u2500
         if (recognizerJa == null || recognizerLat == null) {
-            Toast.makeText(this, "⚠ ML Kit غير مهيأ — أعد تثبيت التطبيق", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "\u26A0 ML Kit \u063A\u064A\u0631 \u0645\u0647\u064A\u0623 \u2014 \u0623\u0639\u062F \u062A\u062B\u0628\u064A\u062A \u0627\u0644\u062A\u0637\u0628\u064A\u0642", Toast.LENGTH_LONG).show();
             return;
         }
 
-        // ─── بدء OCR ───
+        // \u2500\u2500\u2500 \u0628\u062F\u0621 OCR \u2500\u2500\u2500
         ocrBusy = true;
-        tvBtnIcon.setText("📷");
+        tvBtnIcon.setText("\uD83D\uDCF7");
         btnView.setAlpha(ALPHA_BUSY);
         animateBtnPulse(true);
 
         if (tvTranslation != null) {
-            tvTranslation.setText("⏳  يقرأ الشاشة…");
+            tvTranslation.setText("\u23F3  \u064A\u0642\u0631\u0623 \u0627\u0644\u0634\u0627\u0634\u0629\u2026");
             tvTranslation.setTextColor(Color.parseColor("#2a4a70"));
         }
         if (tvOriginal != null) tvOriginal.setText("");
         showOverlay();
 
-        // دقة منخفضة لسرعة أكبر
+        // \u062F\u0642\u0629 \u0645\u0646\u062E\u0641\u0636\u0629 \u0644\u0633\u0631\u0639\u0629 \u0623\u0643\u0628\u0631
         int capW = SW / 2;
         int capH = SH / 2;
         int density = getResources().getDisplayMetrics().densityDpi;
@@ -648,16 +648,16 @@ public class FloatingTranslatorService extends Service {
                 "GT_OCR", capW, capH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, null);
-            Log.d(TAG, "VirtualDisplay created ✓");
+            Log.d(TAG, "VirtualDisplay created \u2713");
         } catch (Exception e) {
             Log.e(TAG, "VirtualDisplay failed: " + e.getMessage());
             ocrBusy = false;
             animateBtnPulse(false);
-            tvBtnIcon.setText("🌐");
+            tvBtnIcon.setText("\uD83C\uDF10");
             btnView.setAlpha(ALPHA_IDLE);
-            mediaProjection = null; // انتهى صلاحيته
+            mediaProjection = null; // \u0627\u0646\u062A\u0647\u0649 \u0635\u0644\u0627\u062D\u064A\u062A\u0647
             if (tvTranslation != null) {
-                tvTranslation.setText("⚠  فشل تصوير الشاشة\nافتح التطبيق وأعد الإذن");
+                tvTranslation.setText("\u26A0  \u0641\u0634\u0644 \u062A\u0635\u0648\u064A\u0631 \u0627\u0644\u0634\u0627\u0634\u0629\n\u0627\u0641\u062A\u062D \u0627\u0644\u062A\u0637\u0628\u064A\u0642 \u0648\u0623\u0639\u062F \u0627\u0644\u0625\u0630\u0646");
                 tvTranslation.setTextColor(Color.parseColor("#ef5350"));
             }
             return;
@@ -666,7 +666,7 @@ public class FloatingTranslatorService extends Service {
         final ImageReader finalReader = reader;
         final VirtualDisplay finalVd  = vd;
 
-        // انتظر 350ms حتى يستقر الـ VirtualDisplay
+        // \u0627\u0646\u062A\u0638\u0631 350ms \u062D\u062A\u0649 \u064A\u0633\u062A\u0642\u0631 \u0627\u0644\u0640 VirtualDisplay
         H.postDelayed(() -> {
             Bitmap bmp = null;
             try {
@@ -681,7 +681,7 @@ public class FloatingTranslatorService extends Service {
                     tmp.copyPixelsFromBuffer(buf);
                     bmp = Bitmap.createBitmap(tmp, 0, 0, capW, capH);
                     img.close();
-                    Log.d(TAG, "Screenshot captured ✓ (" + capW + "x" + capH + ")");
+                    Log.d(TAG, "Screenshot captured \u2713 (" + capW + "x" + capH + ")");
                 } else {
                     Log.w(TAG, "acquireLatestImage returned null");
                 }
@@ -695,16 +695,16 @@ public class FloatingTranslatorService extends Service {
             if (bmp == null) {
                 ocrBusy = false;
                 animateBtnPulse(false);
-                tvBtnIcon.setText("🌐");
+                tvBtnIcon.setText("\uD83C\uDF10");
                 btnView.setAlpha(ALPHA_IDLE);
                 if (tvTranslation != null) {
-                    tvTranslation.setText("⚠  لم يتمكن من التقاط الشاشة\nأعد المحاولة");
+                    tvTranslation.setText("\u26A0  \u0644\u0645 \u064A\u062A\u0645\u0643\u0646 \u0645\u0646 \u0627\u0644\u062A\u0642\u0627\u0637 \u0627\u0644\u0634\u0627\u0634\u0629\n\u0623\u0639\u062F \u0627\u0644\u0645\u062D\u0627\u0648\u0644\u0629");
                     tvTranslation.setTextColor(Color.parseColor("#ef5350"));
                 }
                 return;
             }
 
-            // اختر المعرِّف المناسب بحسب لغة المصدر
+            // \u0627\u062E\u062A\u0631 \u0627\u0644\u0645\u0639\u0631\u0650\u0651\u0641 \u0627\u0644\u0645\u0646\u0627\u0633\u0628 \u0628\u062D\u0633\u0628 \u0644\u063A\u0629 \u0627\u0644\u0645\u0635\u062F\u0631
             boolean useJa = fromLang.equals("ja") || fromLang.equals("ko")
                          || fromLang.equals("zh") || fromLang.equals("auto");
             TextRecognizer rec = useJa ? recognizerJa : recognizerLat;
@@ -714,7 +714,7 @@ public class FloatingTranslatorService extends Service {
                 .addOnSuccessListener(result -> {
                     ocrBusy = false;
                     animateBtnPulse(false);
-                    tvBtnIcon.setText("🌐");
+                    tvBtnIcon.setText("\uD83C\uDF10");
                     btnView.setAlpha(ALPHA_IDLE);
 
                     String text = result.getText().trim();
@@ -722,7 +722,7 @@ public class FloatingTranslatorService extends Service {
 
                     if (text.isEmpty()) {
                         if (tvTranslation != null) {
-                            tvTranslation.setText("⚠  لم يُعثر على نص في الشاشة");
+                            tvTranslation.setText("\u26A0  \u0644\u0645 \u064A\u064F\u0639\u062B\u0631 \u0639\u0644\u0649 \u0646\u0635 \u0641\u064A \u0627\u0644\u0634\u0627\u0634\u0629");
                             tvTranslation.setTextColor(Color.parseColor("#ef5350"));
                         }
                     } else {
@@ -732,32 +732,32 @@ public class FloatingTranslatorService extends Service {
                 .addOnFailureListener(e -> {
                     ocrBusy = false;
                     animateBtnPulse(false);
-                    tvBtnIcon.setText("🌐");
+                    tvBtnIcon.setText("\uD83C\uDF10");
                     btnView.setAlpha(ALPHA_IDLE);
                     Log.e(TAG, "OCR failed: " + e.getMessage());
                     if (tvTranslation != null) {
-                        tvTranslation.setText("⚠  " + e.getMessage());
+                        tvTranslation.setText("\u26A0  " + e.getMessage());
                         tvTranslation.setTextColor(Color.parseColor("#ef5350"));
                     }
                 });
         }, 350);
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // الترجمة عبر Google Translate API (مجانية، بدون مفتاح)
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0627\u0644\u062A\u0631\u062C\u0645\u0629 \u0639\u0628\u0631 Google Translate API (\u0645\u062C\u0627\u0646\u064A\u0629\u060C \u0628\u062F\u0648\u0646 \u0645\u0641\u062A\u0627\u062D)
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void doTranslate(String text) {
         if (translating) return;
         translating = true;
         cancelDismiss();
 
-        tvBtnIcon.setText("⏳");
+        tvBtnIcon.setText("\u23F3");
         btnView.setAlpha(ALPHA_BUSY);
 
-        String display = text.length() > 80 ? text.substring(0, 80) + "…" : text;
+        String display = text.length() > 80 ? text.substring(0, 80) + "\u2026" : text;
         if (tvOriginal != null) tvOriginal.setText(display);
         if (tvTranslation != null) {
-            tvTranslation.setText("⏳  جاري الترجمة…");
+            tvTranslation.setText("\u23F3  \u062C\u0627\u0631\u064A \u0627\u0644\u062A\u0631\u062C\u0645\u0629\u2026");
             tvTranslation.setTextColor(Color.parseColor("#2a4a70"));
         }
         if (tvLangBar != null) tvLangBar.setText(pairText());
@@ -768,13 +768,13 @@ public class FloatingTranslatorService extends Service {
         new Thread(() -> {
             try {
                 String result = googleTranslate(input, fromLang, toLang);
-                Log.d(TAG, "Translation ✓: " + result.substring(0, Math.min(result.length(), 40)));
+                Log.d(TAG, "Translation \u2713: " + result.substring(0, Math.min(result.length(), 40)));
 
                 if (destroyed) return;
                 H.post(() -> {
                     translating = false;
-                    tvBtnIcon.setText("✓");
-                    H.postDelayed(() -> { if (!destroyed) tvBtnIcon.setText("🌐"); }, 2_000);
+                    tvBtnIcon.setText("\u2713");
+                    H.postDelayed(() -> { if (!destroyed) tvBtnIcon.setText("\uD83C\uDF10"); }, 2_000);
 
                     if (tvTranslation != null) {
                         tvTranslation.setText(result);
@@ -790,9 +790,9 @@ public class FloatingTranslatorService extends Service {
                 if (destroyed) return;
                 H.post(() -> {
                     translating = false;
-                    tvBtnIcon.setText("🌐");
+                    tvBtnIcon.setText("\uD83C\uDF10");
                     if (tvTranslation != null) {
-                        tvTranslation.setText("⚠  " + e.getMessage());
+                        tvTranslation.setText("\u26A0  " + e.getMessage());
                         tvTranslation.setTextColor(Color.parseColor("#ef5350"));
                     }
                     btnView.setAlpha(ALPHA_IDLE);
@@ -801,16 +801,16 @@ public class FloatingTranslatorService extends Service {
         }).start();
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // اختيار اللغة (نقرتان)
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0644\u0644\u063A\u0629 (\u0646\u0642\u0631\u062A\u0627\u0646)
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     interface LangCb { void pick(String code); }
 
     private void openPicker() {
         pickerFrom = fromLang;
-        showPickerDialog("من أي لغة؟", true, code -> {
+        showPickerDialog("\u0645\u0646 \u0623\u064A \u0644\u063A\u0629\u061F", true, code -> {
             pickerFrom = code;
-            H.post(() -> showPickerDialog("إلى أي لغة؟", false, code2 -> {
+            H.post(() -> showPickerDialog("\u0625\u0644\u0649 \u0623\u064A \u0644\u063A\u0629\u061F", false, code2 -> {
                 fromLang = pickerFrom;
                 toLang   = code2;
                 ClipboardBridge.saveLang(this, fromLang, toLang);
@@ -834,7 +834,7 @@ public class FloatingTranslatorService extends Service {
         root.setBackground(bg);
         root.setElevation(dp(20));
 
-        // ─── عنوان + زر الإغلاق ───
+        // \u2500\u2500\u2500 \u0639\u0646\u0648\u0627\u0646 + \u0632\u0631 \u0627\u0644\u0625\u063A\u0644\u0627\u0642 \u2500\u2500\u2500
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -848,7 +848,7 @@ public class FloatingTranslatorService extends Service {
         tr.addView(tvTitle, new LinearLayout.LayoutParams(0, wc(), 1f));
 
         TextView xBtn = new TextView(this);
-        xBtn.setText("✕");
+        xBtn.setText("\u2715");
         xBtn.setTextColor(Color.parseColor("#e05050"));
         xBtn.setTextSize(16f);
         xBtn.setPadding(dp(12), dp(4), dp(2), dp(4));
@@ -862,7 +862,7 @@ public class FloatingTranslatorService extends Service {
         divider.setBackgroundColor(Color.parseColor("#192848"));
         root.addView(divider, divLp);
 
-        // ─── قائمة اللغات ───
+        // \u2500\u2500\u2500 \u0642\u0627\u0626\u0645\u0629 \u0627\u0644\u0644\u063A\u0627\u062A \u2500\u2500\u2500
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout list = new LinearLayout(this);
@@ -914,9 +914,9 @@ public class FloatingTranslatorService extends Service {
         pickerView = null;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // معالجة اللمس على الزر العائم
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0645\u0639\u0627\u0644\u062C\u0629 \u0627\u0644\u0644\u0645\u0633 \u0639\u0644\u0649 \u0627\u0644\u0632\u0631 \u0627\u0644\u0639\u0627\u0626\u0645
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private class BtnTouch implements View.OnTouchListener {
         private int   ix, iy;
         private float rx, ry;
@@ -947,7 +947,7 @@ public class FloatingTranslatorService extends Service {
                     if (!dragged) {
                         long held = System.currentTimeMillis() - downAt;
                         if (held >= LONG_MS) {
-                            // ضغط طويل — AUTO MODE
+                            // \u0636\u063A\u0637 \u0637\u0648\u064A\u0644 \u2014 AUTO MODE
                             if (autoMode) stopAuto(); else startAuto();
                         } else {
                             tapCount++;
@@ -970,35 +970,35 @@ public class FloatingTranslatorService extends Service {
     }
 
     /**
-     * نقرة واحدة — OCR مباشر دائماً
-     * ❌ لا fallback للحافظة
-     * ❌ لا popup كبير
+     * \u0646\u0642\u0631\u0629 \u0648\u0627\u062D\u062F\u0629 \u2014 OCR \u0645\u0628\u0627\u0634\u0631 \u062F\u0627\u0626\u0645\u0627\u064B
+     * \u274C \u0644\u0627 fallback \u0644\u0644\u062D\u0627\u0641\u0638\u0629
+     * \u274C \u0644\u0627 popup \u0643\u0628\u064A\u0631
      */
     private void onSingleTap() {
-        // إذا كان الـ picker مفتوح — اغلقه
+        // \u0625\u0630\u0627 \u0643\u0627\u0646 \u0627\u0644\u0640 picker \u0645\u0641\u062A\u0648\u062D \u2014 \u0627\u063A\u0644\u0642\u0647
         if (pickerView != null) {
             closePicker();
             btnView.setAlpha(ALPHA_IDLE);
             return;
         }
-        // إذا الـ overlay ظاهر — أخفه
+        // \u0625\u0630\u0627 \u0627\u0644\u0640 overlay \u0638\u0627\u0647\u0631 \u2014 \u0623\u062E\u0641\u0647
         if (overlayVisible) {
             hideOverlay();
             return;
         }
-        // OCR مباشر — هذا هو السلوك الافتراضي الوحيد
+        // OCR \u0645\u0628\u0627\u0634\u0631 \u2014 \u0647\u0630\u0627 \u0647\u0648 \u0627\u0644\u0633\u0644\u0648\u0643 \u0627\u0644\u0627\u0641\u062A\u0631\u0627\u0636\u064A \u0627\u0644\u0648\u062D\u064A\u062F
         doOCR();
     }
 
-    /** نقرتان — اختيار اللغة */
+    /** \u0646\u0642\u0631\u062A\u0627\u0646 \u2014 \u0627\u062E\u062A\u064A\u0627\u0631 \u0627\u0644\u0644\u063A\u0629 */
     private void onDoubleTap() {
         if (overlayVisible) hideOverlay();
         openPicker();
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // Google Translate (بدون مفتاح API)
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // Google Translate (\u0628\u062F\u0648\u0646 \u0645\u0641\u062A\u0627\u062D API)
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private String googleTranslate(String text, String from, String to) throws Exception {
         String q = URLEncoder.encode(text, "UTF-8");
         String url = "https://translate.googleapis.com/translate_a/single"
@@ -1024,13 +1024,13 @@ public class FloatingTranslatorService extends Service {
             if (!p.isNull(0)) res.append(p.getString(0));
         }
         String result = res.toString().trim();
-        if (result.isEmpty()) throw new Exception("الترجمة فارغة");
+        if (result.isEmpty()) throw new Exception("\u0627\u0644\u062A\u0631\u062C\u0645\u0629 \u0641\u0627\u0631\u063A\u0629");
         return result;
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // أدوات مساعدة
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0623\u062F\u0648\u0627\u062A \u0645\u0633\u0627\u0639\u062F\u0629
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private String getClipText() {
         try {
             if (clipMgr != null && clipMgr.hasPrimaryClip()) {
@@ -1042,8 +1042,8 @@ public class FloatingTranslatorService extends Service {
         return null;
     }
 
-    private String pairText() { return emoji(fromLang) + " → " + emoji(toLang) + " " + name(toLang); }
-    private String emoji(String c) { for (String[] l : LANGS) if (l[0].equals(c)) return l[2]; return "🌐"; }
+    private String pairText() { return emoji(fromLang) + " \u2192 " + emoji(toLang) + " " + name(toLang); }
+    private String emoji(String c) { for (String[] l : LANGS) if (l[0].equals(c)) return l[2]; return "\uD83C\uDF10"; }
     private String name(String c)  { for (String[] l : LANGS) if (l[0].equals(c)) return l[1]; return c; }
 
     private int dp(int v) {
@@ -1069,9 +1069,9 @@ public class FloatingTranslatorService extends Service {
         if (v != null) try { wm.removeView(v); } catch (Exception ignored) {}
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // الإشعار الدائم (Foreground Service)
-    // ════════════════════════════════════════════════════════════════
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+    // \u0627\u0644\u0625\u0634\u0639\u0627\u0631 \u0627\u0644\u062F\u0627\u0626\u0645 (Foreground Service)
+    // \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
@@ -1088,8 +1088,8 @@ public class FloatingTranslatorService extends Service {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 ? PendingIntent.FLAG_IMMUTABLE : 0);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("🌐 UniversalTranslator")
-            .setContentText("Tap = OCR  •  Double tap = Language  •  Hold = AUTO")
+            .setContentTitle("\uD83C\uDF10 UniversalTranslator")
+            .setContentText("Tap = OCR  \u2022  Double tap = Language  \u2022  Hold = AUTO")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pi)
             .setOngoing(true)
