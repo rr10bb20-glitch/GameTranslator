@@ -8,10 +8,17 @@ import android.app.Service;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.VirtualDisplay;
+import android.media.Image;
+import android.media.ImageReader;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -27,38 +34,22 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.core.app.NotificationCompat;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.japanese.JapaneseTextRecognizerOptions;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import org.json.JSONArray;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
 
-/**
- * FloatingTranslatorService — v5 Minimal & Clean
- * ═══════════════════════════════════════════════════════
- *
- * الصلاحيات المستخدمة فعلياً:
- *   INTERNET               — Google Translate عبر HTTPS (لا API key)
- *   SYSTEM_ALERT_WINDOW    — الأوفرلاي
- *   FOREGROUND_SERVICE     — الخدمة
- *
- * خصائص اللوحة:
- *   ✅ FLAG_NOT_TOUCHABLE   — لا تحجب اللمس أبداً، اللعبة تستقبل كل اللمسات
- *   ✅ FLAG_NOT_FOCUSABLE   — لا تسرق focus لوحة المفاتيح
- *   ✅ FLAG_NOT_TOUCH_MODAL — لا تحجب events خارجها
- *   ✅ شفافة بالكامل — يُرى ما خلفها
- *   ✅ إغلاق تلقائي بعد 10 ثوان
- *   ✅ لا مفاتيح API — gtx endpoint مجاني
- *
- * تحكم الزر:
- *   نقرة واحدة  — ترجمة الحافظة / إخفاء اللوحة
- *   نقرة مزدوجة — اختيار اللغة
- *   ضغط طويل   — تبديل AUTO MODE
- */
 public class FloatingTranslatorService extends Service {
 
-    private static final String CHANNEL_ID = "gt_v5";
+    private static final String CHANNEL_ID = "gt_v8";
     private static final int    NOTIF_ID   = 1;
     private static final long   DISMISS_MS = 10_000;
     private static final long   LONG_MS    = 700;
@@ -92,6 +83,7 @@ public class FloatingTranslatorService extends Service {
     private View     overlayView;
     private View     pickerView;
     private WindowManager.LayoutParams btnLP, overlayLP, pickerLP;
+    private GradientDrawable btnCircleBg;
 
     // Child refs
     private TextView tvBtnIcon;
@@ -104,6 +96,7 @@ public class FloatingTranslatorService extends Service {
     private boolean overlayVisible = false;
     private boolean autoMode       = false;
     private boolean translating    = false;
+    private boolean ocrBusy        = false;
     private volatile boolean destroyed = false;
     private String  fromLang       = "auto";
     private String  toLang         = "ar";
@@ -114,31 +107,40 @@ public class FloatingTranslatorService extends Service {
     private ClipboardManager.OnPrimaryClipChangedListener clipCb;
     private String lastClipHash = "";
 
+    // MediaProjection / OCR
+    private MediaProjection        mediaProjection;
+    private MediaProjectionManager mpManager;
+    private TextRecognizer         recognizerJa;
+    private TextRecognizer         recognizerLat;
+
     // Timers
     private Runnable dismissR;
     private Runnable doubleTapCheck;
-    private int      tapCount = 0;
+    private Runnable pulseR;
+    private boolean  pulseState = false;
+    private int      tapCount   = 0;
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     @Override
     public void onCreate() {
         super.onCreate();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             android.graphics.Rect bounds = wm.getCurrentWindowMetrics().getBounds();
-            SW = bounds.width();
-            SH = bounds.height();
+            SW = bounds.width(); SH = bounds.height();
         } else {
             DisplayMetrics dm = new DisplayMetrics();
-            //noinspection deprecation
             wm.getDefaultDisplay().getMetrics(dm);
-            SW = dm.widthPixels;
-            SH = dm.heightPixels;
+            SW = dm.widthPixels; SH = dm.heightPixels;
         }
 
         fromLang = ClipboardBridge.readFromLang(this);
         toLang   = ClipboardBridge.readToLang(this);
         clipMgr  = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+
+        mpManager     = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
+        recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
 
         createChannel();
         startForeground(NOTIF_ID, buildNotif());
@@ -146,7 +148,18 @@ public class FloatingTranslatorService extends Service {
         buildOverlay();
     }
 
-    @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
+    @Override
+    public int onStartCommand(Intent intent, int f, int s) {
+        // استقبال MediaProjection من MainActivity
+        if (intent != null && intent.hasExtra("mp_result_code")) {
+            int    rc   = intent.getIntExtra("mp_result_code", -1);
+            Intent data = intent.getParcelableExtra("mp_data");
+            if (data != null)
+                mediaProjection = mpManager.getMediaProjection(rc, data);
+        }
+        return START_STICKY;
+    }
+
     @Override public IBinder onBind(Intent i) { return null; }
 
     @Override
@@ -154,15 +167,19 @@ public class FloatingTranslatorService extends Service {
         super.onDestroy();
         destroyed = true;
         cancelDismiss();
+        if (pulseR != null) H.removeCallbacks(pulseR);
         stopAuto();
+        if (recognizerJa  != null) recognizerJa.close();
+        if (recognizerLat != null) recognizerLat.close();
+        if (mediaProjection != null) mediaProjection.stop();
         safeRemove(btnView);
         safeRemove(overlayView);
         safeRemove(pickerView);
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     // Floating Button
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private void buildButton() {
         FrameLayout root   = new FrameLayout(this);
         FrameLayout circle = new FrameLayout(this);
@@ -177,6 +194,7 @@ public class FloatingTranslatorService extends Service {
         bg.setStroke(dp(2), Color.parseColor("#2a5090"));
         circle.setBackground(bg);
         circle.setElevation(dp(12));
+        btnCircleBg = bg;
 
         tvBtnIcon = new TextView(this);
         tvBtnIcon.setText("🌐");
@@ -185,7 +203,6 @@ public class FloatingTranslatorService extends Service {
         tvBtnIcon.setIncludeFontPadding(false);
         circle.addView(tvBtnIcon, matchParent());
 
-        // Auto dot
         autoDot = new View(this);
         int dotSz = dp(9);
         FrameLayout.LayoutParams dotLp = new FrameLayout.LayoutParams(dotSz, dotSz);
@@ -216,9 +233,9 @@ public class FloatingTranslatorService extends Service {
         wm.addView(btnView, btnLP);
     }
 
-    // ═════════════════════════════════════════════════════
-    // Overlay — FLAG_NOT_TOUCHABLE: لا تحجب اللمس أبداً
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // Overlay
+    // ═══════════════════════════════════════════════════
     private void buildOverlay() {
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.VERTICAL);
@@ -230,13 +247,11 @@ public class FloatingTranslatorService extends Service {
 
         GradientDrawable cardBg = new GradientDrawable();
         cardBg.setShape(GradientDrawable.RECTANGLE);
-        // شفافية 85% — يُرى ما خلفها
         cardBg.setColor(Color.argb(217, 4, 8, 22));
         cardBg.setCornerRadius(dp(16));
         cardBg.setStroke(dp(1), Color.parseColor("#1e3566"));
         card.setBackground(cardBg);
 
-        // شريط اللغة (أعلى)
         tvLangBar = new TextView(this);
         tvLangBar.setText(pairText());
         tvLangBar.setTextColor(Color.parseColor("#4a6a9a"));
@@ -246,14 +261,12 @@ public class FloatingTranslatorService extends Service {
         tvLangBar.setPadding(0, 0, 0, dp(4));
         card.addView(tvLangBar);
 
-        // فاصل
         View div = new View(this);
         LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
         divLp.setMargins(0, 0, 0, dp(6));
         div.setBackgroundColor(Color.parseColor("#121e40"));
         card.addView(div, divLp);
 
-        // النص الأصلي (صغير، خافت)
         tvOriginal = new TextView(this);
         tvOriginal.setTextColor(Color.parseColor("#2e4466"));
         tvOriginal.setTextSize(10f);
@@ -262,7 +275,6 @@ public class FloatingTranslatorService extends Service {
         tvOriginal.setPadding(0, 0, 0, dp(4));
         card.addView(tvOriginal);
 
-        // الترجمة (بارزة)
         tvTranslation = new TextView(this);
         tvTranslation.setText("جاهز  🌐");
         tvTranslation.setTextColor(Color.parseColor("#364a70"));
@@ -275,7 +287,6 @@ public class FloatingTranslatorService extends Service {
         tvTranslation.setEllipsize(android.text.TextUtils.TruncateAt.END);
         card.addView(tvTranslation);
 
-        // تلميح صغير
         TextView hint = new TextView(this);
         hint.setText("⏱ يختفي بعد 10 ث  •  اضغط 🌐 للإغلاق");
         hint.setTextColor(Color.parseColor("#1e3050"));
@@ -289,8 +300,6 @@ public class FloatingTranslatorService extends Service {
 
         overlayLP = new WindowManager.LayoutParams(
             SW, wc(), overlayType(),
-            // ══ FLAG_NOT_TOUCHABLE: اللوحة لا تستقبل اللمس إطلاقاً ══
-            // كل اللمسات تصل للتطبيق/اللعبة تحتها مباشرة
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
@@ -302,9 +311,9 @@ public class FloatingTranslatorService extends Service {
         wm.addView(overlayView, overlayLP);
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     // Show / Hide
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private void showOverlay() {
         overlayVisible = true;
         overlayView.animate().alpha(0.92f).setDuration(200).start();
@@ -327,9 +336,32 @@ public class FloatingTranslatorService extends Service {
         if (dismissR != null) { H.removeCallbacks(dismissR); dismissR = null; }
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // Pulse animation على حدود الزر أثناء OCR / ترجمة
+    // ═══════════════════════════════════════════════════
+    private void animateBtnPulse(boolean start) {
+        if (pulseR != null) { H.removeCallbacks(pulseR); pulseR = null; }
+        if (!start) {
+            if (btnCircleBg != null)
+                btnCircleBg.setStroke(dp(2), Color.parseColor("#2a5090"));
+            return;
+        }
+        pulseR = new Runnable() {
+            @Override public void run() {
+                if (btnCircleBg == null) return;
+                pulseState = !pulseState;
+                btnCircleBg.setStroke(dp(pulseState ? 3 : 2),
+                    pulseState ? Color.parseColor("#00c8ff")
+                               : Color.parseColor("#1a5090"));
+                H.postDelayed(this, 500);
+            }
+        };
+        H.post(pulseR);
+    }
+
+    // ═══════════════════════════════════════════════════
     // AUTO MODE
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private void startAuto() {
         if (autoMode) return;
         autoMode = true;
@@ -359,9 +391,96 @@ public class FloatingTranslatorService extends Service {
         Toast.makeText(this, "AUTO MODE معطّل", Toast.LENGTH_SHORT).show();
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // OCR — قراءة الشاشة
+    // ═══════════════════════════════════════════════════
+    private void doOCR() {
+        if (ocrBusy) return;
+        ocrBusy = true;
+        tvBtnIcon.setText("📷");
+        btnView.animate().alpha(ALPHA_ON).setDuration(150).start();
+        tvTranslation.setText("⏳  يقرأ الشاشة…");
+        tvTranslation.setTextColor(Color.parseColor("#2a4a70"));
+        tvOriginal.setText("");
+        showOverlay();
+        animateBtnPulse(true);
+
+        int capW = SW / 2, capH = SH / 2;
+        int density = getResources().getDisplayMetrics().densityDpi;
+        ImageReader reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+        VirtualDisplay vd;
+        try {
+            vd = mediaProjection.createVirtualDisplay("OCR",
+                capW, capH, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.getSurface(), null, null);
+        } catch (Exception e) {
+            ocrBusy = false;
+            animateBtnPulse(false);
+            tvBtnIcon.setText("🌐");
+            Toast.makeText(this, "فشل تصوير الشاشة", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        H.postDelayed(() -> {
+            Bitmap bmp = null;
+            try {
+                Image img = reader.acquireLatestImage();
+                if (img != null) {
+                    Image.Plane[] planes = img.getPlanes();
+                    ByteBuffer buf = planes[0].getBuffer();
+                    int rStride = planes[0].getRowStride();
+                    int pStride = planes[0].getPixelStride();
+                    Bitmap tmp = Bitmap.createBitmap(
+                        capW + (rStride - pStride * capW) / pStride,
+                        capH, Bitmap.Config.ARGB_8888);
+                    tmp.copyPixelsFromBuffer(buf);
+                    bmp = Bitmap.createBitmap(tmp, 0, 0, capW, capH);
+                    img.close();
+                }
+            } catch (Exception ignored) {}
+            vd.release();
+            reader.close();
+
+            if (bmp == null) {
+                ocrBusy = false;
+                animateBtnPulse(false);
+                tvBtnIcon.setText("🌐");
+                tvTranslation.setText("⚠  فشل التقاط الصورة");
+                tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                return;
+            }
+
+            TextRecognizer rec = (fromLang.equals("ja") || fromLang.equals("ko")
+                || fromLang.equals("zh") || fromLang.equals("auto"))
+                ? recognizerJa : recognizerLat;
+
+            rec.process(InputImage.fromBitmap(bmp, 0))
+                .addOnSuccessListener(result -> {
+                    ocrBusy = false;
+                    animateBtnPulse(false);
+                    tvBtnIcon.setText("🌐");
+                    String text = result.getText().trim();
+                    if (text.isEmpty()) {
+                        tvTranslation.setText("⚠  لم يُعثر على نص");
+                        tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                    } else {
+                        doTranslate(text);
+                    }
+                })
+                .addOnFailureListener(e -> {
+                    ocrBusy = false;
+                    animateBtnPulse(false);
+                    tvBtnIcon.setText("🌐");
+                    tvTranslation.setText("⚠  " + e.getMessage());
+                    tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                });
+        }, 300);
+    }
+
+    // ═══════════════════════════════════════════════════
     // Translation
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private void doTranslate(String text) {
         if (translating) return;
         translating = true;
@@ -407,9 +526,9 @@ public class FloatingTranslatorService extends Service {
         }).start();
     }
 
-    // ═════════════════════════════════════════════════════
-    // Language Picker (يُفتح بنقرتين على الزر)
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // Language Picker
+    // ═══════════════════════════════════════════════════
     interface LangCb { void pick(String code); }
 
     private void openPicker() {
@@ -440,7 +559,6 @@ public class FloatingTranslatorService extends Service {
         root.setBackground(bg);
         root.setElevation(dp(20));
 
-        // Title row
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -463,11 +581,11 @@ public class FloatingTranslatorService extends Service {
         tr.addView(xBtn);
         root.addView(tr);
 
-        View div = new View(this);
+        View divider = new View(this);
         LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
         divLp.setMargins(0, 0, 0, dp(6));
-        div.setBackgroundColor(Color.parseColor("#192848"));
-        root.addView(div, divLp);
+        divider.setBackgroundColor(Color.parseColor("#192848"));
+        root.addView(divider, divLp);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
@@ -519,9 +637,9 @@ public class FloatingTranslatorService extends Service {
         pickerView = null;
     }
 
-    // ═════════════════════════════════════════════════════
-    // Button Touch — نقرة / نقرتان / ضغط طويل / سحب
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // Button Touch
+    // ═══════════════════════════════════════════════════
     private class BtnTouch implements View.OnTouchListener {
         private int   ix, iy;
         private float rx, ry;
@@ -552,19 +670,13 @@ public class FloatingTranslatorService extends Service {
                     if (!dragged) {
                         long held = System.currentTimeMillis() - downAt;
                         if (held >= LONG_MS) {
-                            // ضغط طويل → AUTO MODE
                             if (autoMode) stopAuto(); else startAuto();
                         } else {
-                            // نقرة — نتحقق هل هي نقرتان
                             tapCount++;
                             if (tapCount == 1) {
-                                doubleTapCheck = () -> {
-                                    tapCount = 0;
-                                    onSingleTap(); // نقرة واحدة مؤكدة
-                                };
+                                doubleTapCheck = () -> { tapCount = 0; onSingleTap(); };
                                 H.postDelayed(doubleTapCheck, DOUBLE_MS);
                             } else {
-                                // نقرتان
                                 if (doubleTapCheck != null) H.removeCallbacks(doubleTapCheck);
                                 tapCount = 0;
                                 onDoubleTap();
@@ -581,25 +693,25 @@ public class FloatingTranslatorService extends Service {
 
     private void onSingleTap() {
         if (pickerView != null)  { closePicker(); btnView.setAlpha(ALPHA_IDLE); return; }
-        if (overlayVisible)       { hideOverlay(); return; }
+        if (overlayVisible)      { hideOverlay(); return; }
+        // لو mediaProjection متوفر → OCR أولاً، وإلا → حافظة
+        if (mediaProjection != null) { doOCR(); return; }
         String text = clip();
-        if (text != null && !text.isEmpty()) {
-            doTranslate(text);
-        } else {
-            Toast.makeText(this, "الحافظة فارغة — انسخ نصاً من اللعبة 📋", Toast.LENGTH_SHORT).show();
+        if (text != null && !text.isEmpty()) doTranslate(text);
+        else {
+            Toast.makeText(this, "الحافظة فارغة 📋", Toast.LENGTH_SHORT).show();
             btnView.setAlpha(ALPHA_IDLE);
         }
     }
 
     private void onDoubleTap() {
-        // نقرتان → اختيار اللغة
         if (overlayVisible) hideOverlay();
         openPicker();
     }
 
-    // ═════════════════════════════════════════════════════
-    // Google Translate — HTTPS، لا API key، لا بيانات حساسة
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
+    // Google Translate
+    // ═══════════════════════════════════════════════════
     private String googleTranslate(String text, String from, String to) throws Exception {
         String q = URLEncoder.encode(text, "UTF-8");
         String url = "https://translate.googleapis.com/translate_a/single"
@@ -626,9 +738,9 @@ public class FloatingTranslatorService extends Service {
         return result;
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     // Helpers
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private String clip() {
         try {
             if (clipMgr != null && clipMgr.hasPrimaryClip()) {
@@ -650,18 +762,19 @@ public class FloatingTranslatorService extends Service {
             : WindowManager.LayoutParams.TYPE_PHONE;
     }
     private int wc() { return WindowManager.LayoutParams.WRAP_CONTENT; }
-    private int mp() { return LinearLayout.LayoutParams.MATCH_PARENT;  }
+    private int mp() { return LinearLayout.LayoutParams.MATCH_PARENT; }
     private FrameLayout.LayoutParams matchParent() {
         return new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT);
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT);
     }
     private void safeRemove(View v) {
         if (v != null) try { wm.removeView(v); } catch (Exception ignored) {}
     }
 
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     // Notification
-    // ═════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
@@ -678,7 +791,7 @@ public class FloatingTranslatorService extends Service {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("🌐 مترجم الألعاب يعمل")
-            .setContentText("نقرة = ترجمة  •  نقرتان = اللغة  •  ضغط طويل = AUTO MODE")
+            .setContentText("نقرة = ترجمة/OCR  •  نقرتان = اللغة  •  ضغط طويل = AUTO")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pi)
             .setOngoing(true)
