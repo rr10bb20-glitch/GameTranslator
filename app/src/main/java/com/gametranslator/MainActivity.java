@@ -101,11 +101,17 @@ public class MainActivity extends AppCompatActivity {
                                Uri.parse("package:" + getPackageName())),
                     OVERLAY_PERMISSION_REQUEST);
             } else {
-                startFloatingService();
+                requestScreenCapture();
             }
         } else {
-            startFloatingService();
+            requestScreenCapture();
         }
+    }
+
+    private void requestScreenCapture() {
+        // طلب إذن تصوير الشاشة
+        mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        startActivityForResult(mpManager.createScreenCaptureIntent(), REQ_SCREEN_CAP);
     }
 
     @Override
@@ -115,9 +121,11 @@ public class MainActivity extends AppCompatActivity {
 
         if (req == OVERLAY_PERMISSION_REQUEST) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(this)) {
-                startFloatingService();
+                requestScreenCapture();
             } else {
                 Toast.makeText(this, "بدون الإذن لن يعمل الزر العائم", Toast.LENGTH_LONG).show();
+                // شغّل الخدمة بدون MediaProjection
+                startService(new Intent(this, FloatingTranslatorService.class));
             }
         }
 
@@ -131,19 +139,17 @@ public class MainActivity extends AppCompatActivity {
                 startForegroundService(svc);
             else
                 startService(svc);
-            finish();
-        }
-    }
 
-    private void startFloatingService() {
-        mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        startActivityForResult(mpManager.createScreenCaptureIntent(), REQ_SCREEN_CAP);
+            // ✅ لا finish() — التطبيق يبقى شغال في الخلفية
+            // نخفي الـ Activity بدل ما نغلقها
+            moveTaskToBack(true);
+        }
     }
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        // الرجوع يخفي التطبيق بدل ما يغلقه
+        moveTaskToBack(true);
     }
 
     @Override
@@ -153,7 +159,7 @@ public class MainActivity extends AppCompatActivity {
             webView.destroy();
             webView = null;
         }
-        stopService(new Intent(this, FloatingTranslatorService.class));
+        // ✅ لا stopService — الخدمة تبقى شغالة
         super.onDestroy();
     }
 }
