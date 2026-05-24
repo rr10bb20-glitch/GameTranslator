@@ -137,10 +137,16 @@ public class FloatingTranslatorService extends Service {
         fromLang = ClipboardBridge.readFromLang(this);
         toLang   = ClipboardBridge.readToLang(this);
         clipMgr  = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 
-        mpManager     = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
-        recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        // تهيئة OCR بشكل آمن
+        try {
+            recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
+            recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        } catch (Exception e) {
+            recognizerJa  = null;
+            recognizerLat = null;
+        }
 
         createChannel();
         startForeground(NOTIF_ID, buildNotif());
@@ -150,12 +156,21 @@ public class FloatingTranslatorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int f, int s) {
-        // استقبال MediaProjection من MainActivity
         if (intent != null && intent.hasExtra("mp_result_code")) {
             int    rc   = intent.getIntExtra("mp_result_code", -1);
             Intent data = intent.getParcelableExtra("mp_data");
-            if (data != null)
-                mediaProjection = mpManager.getMediaProjection(rc, data);
+            if (rc != -1 && data != null) {
+                try {
+                    // أوقف القديم لو موجود
+                    if (mediaProjection != null) {
+                        mediaProjection.stop();
+                        mediaProjection = null;
+                    }
+                    mediaProjection = mpManager.getMediaProjection(rc, data);
+                } catch (Exception e) {
+                    mediaProjection = null;
+                }
+            }
         }
         return START_STICKY;
     }
@@ -169,9 +184,9 @@ public class FloatingTranslatorService extends Service {
         cancelDismiss();
         if (pulseR != null) H.removeCallbacks(pulseR);
         stopAuto();
-        if (recognizerJa  != null) recognizerJa.close();
-        if (recognizerLat != null) recognizerLat.close();
-        if (mediaProjection != null) mediaProjection.stop();
+        try { if (recognizerJa  != null) recognizerJa.close();  } catch (Exception ignored) {}
+        try { if (recognizerLat != null) recognizerLat.close(); } catch (Exception ignored) {}
+        try { if (mediaProjection != null) mediaProjection.stop(); } catch (Exception ignored) {}
         safeRemove(btnView);
         safeRemove(overlayView);
         safeRemove(pickerView);
@@ -311,9 +326,6 @@ public class FloatingTranslatorService extends Service {
         wm.addView(overlayView, overlayLP);
     }
 
-    // ═══════════════════════════════════════════════════
-    // Show / Hide
-    // ═══════════════════════════════════════════════════
     private void showOverlay() {
         overlayVisible = true;
         overlayView.animate().alpha(0.92f).setDuration(200).start();
@@ -337,7 +349,7 @@ public class FloatingTranslatorService extends Service {
     }
 
     // ═══════════════════════════════════════════════════
-    // Pulse animation على حدود الزر أثناء OCR / ترجمة
+    // Pulse
     // ═══════════════════════════════════════════════════
     private void animateBtnPulse(boolean start) {
         if (pulseR != null) { H.removeCallbacks(pulseR); pulseR = null; }
@@ -348,7 +360,7 @@ public class FloatingTranslatorService extends Service {
         }
         pulseR = new Runnable() {
             @Override public void run() {
-                if (btnCircleBg == null) return;
+                if (btnCircleBg == null || destroyed) return;
                 pulseState = !pulseState;
                 btnCircleBg.setStroke(dp(pulseState ? 3 : 2),
                     pulseState ? Color.parseColor("#00c8ff")
@@ -388,28 +400,44 @@ public class FloatingTranslatorService extends Service {
             try { clipMgr.removePrimaryClipChangedListener(clipCb); } catch (Exception ignored) {}
             clipCb = null;
         }
-        Toast.makeText(this, "AUTO MODE معطّل", Toast.LENGTH_SHORT).show();
     }
 
     // ═══════════════════════════════════════════════════
-    // OCR — قراءة الشاشة
+    // OCR
     // ═══════════════════════════════════════════════════
     private void doOCR() {
+        // null checks كاملة
         if (ocrBusy) return;
+        if (mediaProjection == null) {
+            // fallback للحافظة
+            String text = clip();
+            if (text != null && !text.isEmpty()) doTranslate(text);
+            else Toast.makeText(this, "الحافظة فارغة 📋", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (recognizerJa == null || recognizerLat == null) {
+            Toast.makeText(this, "⚠ OCR غير متوفر", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         ocrBusy = true;
         tvBtnIcon.setText("📷");
         btnView.animate().alpha(ALPHA_ON).setDuration(150).start();
-        tvTranslation.setText("⏳  يقرأ الشاشة…");
-        tvTranslation.setTextColor(Color.parseColor("#2a4a70"));
-        tvOriginal.setText("");
+        if (tvTranslation != null) {
+            tvTranslation.setText("⏳  يقرأ الشاشة…");
+            tvTranslation.setTextColor(Color.parseColor("#2a4a70"));
+        }
+        if (tvOriginal != null) tvOriginal.setText("");
         showOverlay();
         animateBtnPulse(true);
 
         int capW = SW / 2, capH = SH / 2;
         int density = getResources().getDisplayMetrics().densityDpi;
-        ImageReader reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+
+        ImageReader reader;
         VirtualDisplay vd;
         try {
+            reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
             vd = mediaProjection.createVirtualDisplay("OCR",
                 capW, capH, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
@@ -418,14 +446,18 @@ public class FloatingTranslatorService extends Service {
             ocrBusy = false;
             animateBtnPulse(false);
             tvBtnIcon.setText("🌐");
-            Toast.makeText(this, "فشل تصوير الشاشة", Toast.LENGTH_SHORT).show();
+            mediaProjection = null; // أعد تعيينه لأنه انتهى
+            Toast.makeText(this, "فشل تصوير الشاشة — انسخ النص يدوياً", Toast.LENGTH_SHORT).show();
             return;
         }
+
+        final ImageReader finalReader = reader;
+        final VirtualDisplay finalVd  = vd;
 
         H.postDelayed(() -> {
             Bitmap bmp = null;
             try {
-                Image img = reader.acquireLatestImage();
+                Image img = finalReader.acquireLatestImage();
                 if (img != null) {
                     Image.Plane[] planes = img.getPlanes();
                     ByteBuffer buf = planes[0].getBuffer();
@@ -439,15 +471,18 @@ public class FloatingTranslatorService extends Service {
                     img.close();
                 }
             } catch (Exception ignored) {}
-            vd.release();
-            reader.close();
+
+            try { finalVd.release(); }    catch (Exception ignored) {}
+            try { finalReader.close(); }  catch (Exception ignored) {}
 
             if (bmp == null) {
                 ocrBusy = false;
                 animateBtnPulse(false);
                 tvBtnIcon.setText("🌐");
-                tvTranslation.setText("⚠  فشل التقاط الصورة");
-                tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                if (tvTranslation != null) {
+                    tvTranslation.setText("⚠  فشل التقاط الصورة");
+                    tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                }
                 return;
             }
 
@@ -455,15 +490,25 @@ public class FloatingTranslatorService extends Service {
                 || fromLang.equals("zh") || fromLang.equals("auto"))
                 ? recognizerJa : recognizerLat;
 
-            rec.process(InputImage.fromBitmap(bmp, 0))
+            if (rec == null) {
+                ocrBusy = false;
+                animateBtnPulse(false);
+                tvBtnIcon.setText("🌐");
+                return;
+            }
+
+            final Bitmap finalBmp = bmp;
+            rec.process(InputImage.fromBitmap(finalBmp, 0))
                 .addOnSuccessListener(result -> {
                     ocrBusy = false;
                     animateBtnPulse(false);
                     tvBtnIcon.setText("🌐");
                     String text = result.getText().trim();
                     if (text.isEmpty()) {
-                        tvTranslation.setText("⚠  لم يُعثر على نص");
-                        tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                        if (tvTranslation != null) {
+                            tvTranslation.setText("⚠  لم يُعثر على نص");
+                            tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                        }
                     } else {
                         doTranslate(text);
                     }
@@ -472,8 +517,10 @@ public class FloatingTranslatorService extends Service {
                     ocrBusy = false;
                     animateBtnPulse(false);
                     tvBtnIcon.setText("🌐");
-                    tvTranslation.setText("⚠  " + e.getMessage());
-                    tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                    if (tvTranslation != null) {
+                        tvTranslation.setText("⚠  " + e.getMessage());
+                        tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                    }
                 });
         }, 300);
     }
@@ -506,9 +553,11 @@ public class FloatingTranslatorService extends Service {
                 H.post(() -> {
                     translating = false;
                     tvBtnIcon.setText("✓");
-                    H.postDelayed(() -> tvBtnIcon.setText("🌐"), 2_000);
-                    tvTranslation.setText(result);
-                    tvTranslation.setTextColor(Color.parseColor("#d0e4ff"));
+                    H.postDelayed(() -> { if (!destroyed) tvBtnIcon.setText("🌐"); }, 2_000);
+                    if (tvTranslation != null) {
+                        tvTranslation.setText(result);
+                        tvTranslation.setTextColor(Color.parseColor("#d0e4ff"));
+                    }
                     btnView.setAlpha(ALPHA_IDLE);
                     if (!autoMode) scheduleDismiss();
                     try { wm.updateViewLayout(overlayView, overlayLP); } catch (Exception ignored) {}
@@ -518,8 +567,10 @@ public class FloatingTranslatorService extends Service {
                 H.post(() -> {
                     translating = false;
                     tvBtnIcon.setText("🌐");
-                    tvTranslation.setText("⚠  " + e.getMessage());
-                    tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                    if (tvTranslation != null) {
+                        tvTranslation.setText("⚠  " + e.getMessage());
+                        tvTranslation.setTextColor(Color.parseColor("#ef5350"));
+                    }
                     btnView.setAlpha(ALPHA_IDLE);
                 });
             }
@@ -694,7 +745,6 @@ public class FloatingTranslatorService extends Service {
     private void onSingleTap() {
         if (pickerView != null)  { closePicker(); btnView.setAlpha(ALPHA_IDLE); return; }
         if (overlayVisible)      { hideOverlay(); return; }
-        // لو mediaProjection متوفر → OCR أولاً، وإلا → حافظة
         if (mediaProjection != null) { doOCR(); return; }
         String text = clip();
         if (text != null && !text.isEmpty()) doTranslate(text);
