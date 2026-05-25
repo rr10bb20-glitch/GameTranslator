@@ -1,16 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!--
-        الصلاحيات المطلوبة:
-        1. INTERNET               — Google Translate API
-        2. SYSTEM_ALERT_WINDOW    — الزر والـ Overlay العائم فوق الألعاب
-        3. FOREGROUND_SERVICE     — إبقاء الخدمة في الخلفية
-        4. FOREGROUND_SERVICE_MEDIA_PROJECTION — مطلوب Android 14+ لـ MediaProjection
-        5. POST_NOTIFICATIONS     — إشعار الخدمة (Android 13+)
-        6. WAKE_LOCK              — منع النوم أثناء OCR
-    -->
-
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -20,6 +10,9 @@
 
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:enableOnBackInvokedCallback="true"
+        android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -29,7 +22,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -37,13 +31,10 @@
             </intent-filter>
         </activity>
 
-        <!--
-            foregroundServiceType="mediaProjection" — مطلوب حتماً لـ Android 10+
-            بدونه يرفض النظام createVirtualDisplay() ويطير MediaProjection
-        -->
         <service
             android:name=".FloatingTranslatorService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="mediaProjection" />
 
     </application>
