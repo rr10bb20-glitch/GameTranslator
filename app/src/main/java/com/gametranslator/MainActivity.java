@@ -12,6 +12,9 @@ import android.provider.Settings;
 import android.util.Log;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResult;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
@@ -28,23 +31,84 @@ import androidx.core.content.ContextCompat;
  * ❌ لا WebView
  * ❌ لا Clipboard
  * ❌ لا UI معقد
+ *
+ * التحسينات المطبّقة:
+ * ✅ استبدال startActivityForResult → registerForActivityResult (modern API)
+ * ✅ حماية mpManager == null
+ * ✅ إزالة Emoji من Toast لتوافق الأجهزة القديمة
+ * ✅ تعليقات واضحة على كل قرار
  */
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "GT_Main";
-    private static final int REQ_NOTIF       = 1001;
-    private static final int REQ_OVERLAY     = 1002;
-    private static final int REQ_SCREEN_CAP  = 1003;
+    private static final int REQ_NOTIF = 1001;
 
     private MediaProjectionManager mpManager;
+
+    // ─── Modern Activity Result API (بديل startActivityForResult المهجور) ────
+
+    /**
+     * Launcher لإذن الـ Overlay (ACTION_MANAGE_OVERLAY_PERMISSION).
+     * لا يعيد resultCode مباشرة، لذلك نتحقق يدوياً بعد العودة.
+     */
+    private final ActivityResultLauncher<Intent> overlayLauncher =
+            registerForActivityResult(
+                    new ActivityResultContracts.StartActivityForResult(),
+                    result -> {
+                        // نتحقق من الإذن مباشرة — resultCode هنا دائماً CANCELED
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                                && Settings.canDrawOverlays(this)) {
+                            requestScreenCapture();
+                        } else {
+                            Toast.makeText(this,
+                                    "بدون اذن الـ Overlay لن يظهر الزر العائم",
+                                    Toast.LENGTH_LONG).show();
+                            launchService(Activity.RESULT_CANCELED, null);
+                        }
+                    });
+
+    /**
+     * Launcher لإذن تصوير الشاشة (MediaProjection).
+     * هنا resultCode يكون RESULT_OK أو RESULT_CANCELED بوضوح.
+     */
+    private final ActivityResultLauncher<Intent> screenCapLauncher =
+            registerForActivityResult(
+                    new ActivityResultContracts.StartActivityForResult(),
+                    result -> {
+                        int resultCode = result.getResultCode();
+                        Intent data    = result.getData();
+
+                        if (resultCode == Activity.RESULT_OK && data != null) {
+                            Log.d(TAG, "Screen capture permission GRANTED");
+                            launchService(resultCode, data);
+                        } else {
+                            Log.w(TAG, "Screen capture permission DENIED");
+                            // لا Emoji — توافق أكبر مع الأجهزة القديمة
+                            Toast.makeText(this,
+                                    "رُفض اذن تصوير الشاشة — OCR لن يعمل.\nاعد فتح التطبيق وامنح الاذن.",
+                                    Toast.LENGTH_LONG).show();
+                            launchService(Activity.RESULT_CANCELED, null);
+                        }
+                    });
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // لا setContentView — نعرض فقط شاشة بيضاء للحظة ثم نختفي
         setContentView(R.layout.activity_main);
 
+        // ✅ حماية: بعض الأجهزة ترجع null لـ MediaProjectionManager
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        if (mpManager == null) {
+            Log.e(TAG, "MediaProjectionManager is null — device may not support screen capture");
+            Toast.makeText(this,
+                    "جهازك لا يدعم تصوير الشاشة — OCR لن يعمل",
+                    Toast.LENGTH_LONG).show();
+            // شغّل الخدمة بدون OCR بدل ما نوقف التطبيق كلياً
+            launchService(Activity.RESULT_CANCELED, null);
+            return;
+        }
 
         // الخطوة 1: إذن الإشعارات (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -64,7 +128,7 @@ public class MainActivity extends AppCompatActivity {
                                            @NonNull String[] permissions,
                                            @NonNull int[] results) {
         super.onRequestPermissionsResult(req, permissions, results);
-        // سواء منح أو رفض — نكمل
+        // سواء مُنح أو رُفض — نكمل
         if (req == REQ_NOTIF) {
             checkOverlay();
         }
@@ -75,12 +139,12 @@ public class MainActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 && !Settings.canDrawOverlays(this)) {
             Toast.makeText(this,
-                    "اسمح بـ \"الظهور فوق التطبيقات\" حتى يعمل الزر العائم",
+                    "اسمح بـ الظهور فوق التطبيقات حتى يعمل الزر العائم",
                     Toast.LENGTH_LONG).show();
-            startActivityForResult(
-                    new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                               Uri.parse("package:" + getPackageName())),
-                    REQ_OVERLAY);
+            Intent intent = new Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+            overlayLauncher.launch(intent);
         } else {
             requestScreenCapture();
         }
@@ -89,45 +153,19 @@ public class MainActivity extends AppCompatActivity {
     /** الخطوة 3: إذن تصوير الشاشة */
     private void requestScreenCapture() {
         Log.d(TAG, "Requesting screen capture permission...");
-        startActivityForResult(mpManager.createScreenCaptureIntent(), REQ_SCREEN_CAP);
-    }
-
-    @Override
-    @SuppressWarnings("deprecation")
-    protected void onActivityResult(int req, int resultCode, Intent data) {
-        super.onActivityResult(req, resultCode, data);
-
-        if (req == REQ_OVERLAY) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                    && Settings.canDrawOverlays(this)) {
-                requestScreenCapture();
-            } else {
-                Toast.makeText(this, "⚠ بدون إذن الـ Overlay لن يظهر الزر العائم", Toast.LENGTH_LONG).show();
-                // شغّل الخدمة بدون MediaProjection — لن يعمل OCR
-                launchService(Activity.RESULT_CANCELED, null);
-            }
-            return;
-        }
-
-        if (req == REQ_SCREEN_CAP) {
-            if (resultCode == Activity.RESULT_OK && data != null) {
-                Log.d(TAG, "Screen capture permission GRANTED ✓");
-                launchService(resultCode, data);
-            } else {
-                Log.w(TAG, "Screen capture permission DENIED");
-                Toast.makeText(this,
-                        "⚠ رُفض إذن تصوير الشاشة — OCR لن يعمل.\nأعد فتح التطبيق وامنح الإذن.",
-                        Toast.LENGTH_LONG).show();
-                // شغّل الخدمة بدون OCR (الزر العائم يبقى)
-                launchService(Activity.RESULT_CANCELED, null);
-            }
-        }
+        // mpManager مضمون غير null هنا (تحققنا في onCreate)
+        screenCapLauncher.launch(mpManager.createScreenCaptureIntent());
     }
 
     /**
      * تشغيل FloatingTranslatorService مع تمرير mp_result_code + mp_data.
-     * بعدها نخفي الـ Activity — لا نغلقها بـ finish() لأن
-     * بعض الأجهزة تقتل الـ Service لو أُغلقت الـ Activity الأم مباشرة.
+     *
+     * ملاحظة حول finish():
+     * لم نضف finish() هنا عمداً — بعض الأجهزة (Xiaomi / Oppo / Realme / Huawei)
+     * تقتل الـ Foreground Service عند إغلاق الـ Activity الأم مباشرة.
+     * moveTaskToBack(true) يخفي التطبيق بأمان مع إبقاء الخدمة حية.
+     * إذا أردت اختبار finish() لاحقاً، أضفه بعد moveTaskToBack وراقب السلوك
+     * على أجهزة Xiaomi تحديداً.
      */
     private void launchService(int resultCode, Intent data) {
         Intent svc = new Intent(this, FloatingTranslatorService.class);
@@ -148,7 +186,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     public void onBackPressed() {
-        // زر الرجوع يخفي بدل ما يغلق
+        // زر الرجوع يخفي بدل ما يغلق — نفس سبب عدم استخدام finish()
         moveTaskToBack(true);
     }
 
