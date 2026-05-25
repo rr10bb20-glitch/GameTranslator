@@ -3,11 +3,10 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no"/>
-  <title>مترجم الألعاب</title>
+  <title>World Translator</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=IBM+Plex+Arabic:wght@300;400;600&display=swap" rel="stylesheet"/>
   <style>
-    /* ─── Reset ─────────────────────────────────────── */
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
     :root{
@@ -35,7 +34,6 @@
       overflow-x:hidden;
     }
 
-    /* ─── Grid background ───────────────────────────── */
     body::before{
       content:'';position:fixed;inset:0;
       background-image:
@@ -46,7 +44,7 @@
     }
     body>*{position:relative;z-index:1}
 
-    /* ─── Header ────────────────────────────────────── */
+    /* ─── Header ─── */
     .hd{
       background:linear-gradient(160deg,#030f28 0%,#071830 60%,#0b2040 100%);
       border-bottom:1px solid var(--c1);
@@ -71,7 +69,6 @@
     }
     .logo-icon{font-size:38px;display:block;animation:float 3s ease-in-out infinite;margin-bottom:4px}
     @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-5px)}}
-
     .logo-sub{
       font-size:10px;color:var(--dim);
       letter-spacing:4px;margin-top:5px;
@@ -89,7 +86,32 @@
     }
     @keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}
 
-    /* ─── Layout ────────────────────────────────────── */
+    /* ─── Debug Banner ─── */
+    #debugBanner{
+      display:none;
+      background:rgba(255,60,0,0.12);
+      border:1px solid #ff4020;
+      border-radius:8px;
+      padding:8px 12px;
+      margin:10px 12px 0;
+      font-size:11px;
+      color:#ff8060;
+      line-height:1.6;
+    }
+    #debugBanner.show{display:block}
+
+    /* ─── Network Status ─── */
+    #netStatus{
+      display:flex;align-items:center;gap:6px;
+      font-size:11px;padding:6px 12px;
+      background:rgba(0,230,118,0.06);
+      border-bottom:1px solid rgba(0,230,118,0.15);
+      color:#4aaa70;
+    }
+    #netStatus.offline{background:rgba(255,60,60,0.06);border-bottom-color:rgba(255,60,60,0.15);color:#aa4444}
+    #netStatus .nd{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+    /* ─── Layout ─── */
     .wrap{padding:14px 12px 80px}
 
     .card{
@@ -119,7 +141,7 @@
     }
     .card-ttl::after{content:'';flex:1;height:1px;background:linear-gradient(90deg,var(--c1),transparent)}
 
-    /* ─── Language pair ─────────────────────────────── */
+    /* ─── Lang Row ─── */
     .lang-row{display:flex;align-items:center;gap:10px}
     select{
       flex:1;background:var(--bg2);border:1px solid var(--c1);
@@ -149,7 +171,7 @@
     }
     .save-btn:active{opacity:.8}
 
-    /* ─── Translate area ────────────────────────────── */
+    /* ─── Translate Area ─── */
     .paste-row{display:flex;gap:8px;margin-bottom:10px}
     textarea{
       flex:1;background:var(--bg2);border:1px solid var(--c1);
@@ -192,9 +214,21 @@
       margin-top:10px;display:none;
     }
     .result.show{display:block}
+    .result.error{color:var(--danger);font-size:13px;font-weight:400}
     .result-meta{font-size:10px;color:var(--dim);margin-top:6px;letter-spacing:.5px}
 
-    /* ─── Steps ─────────────────────────────────────── */
+    /* ─── API Status Row ─── */
+    .api-badges{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+    .badge{
+      font-size:10px;padding:3px 8px;border-radius:20px;
+      border:1px solid;font-family:'Orbitron',sans-serif;
+      letter-spacing:.5px;
+    }
+    .badge.ok{border-color:var(--success);color:var(--success);background:rgba(0,230,118,0.07)}
+    .badge.fail{border-color:var(--danger);color:var(--danger);background:rgba(255,64,96,0.07)}
+    .badge.wait{border-color:var(--dim);color:var(--dim);background:rgba(74,106,154,0.07)}
+
+    /* ─── Steps ─── */
     .step{
       display:flex;gap:14px;align-items:flex-start;
       padding:12px 0;border-bottom:1px solid rgba(26,56,112,.35);
@@ -211,7 +245,7 @@
     .stxt{flex:1;font-size:13px;line-height:1.75;color:#8aA8d0}
     .stxt strong{color:var(--text);font-size:14px;display:block;margin-bottom:2px}
 
-    /* ─── Tips ──────────────────────────────────────── */
+    /* ─── Tips ─── */
     .tip{
       background:rgba(8,18,46,.8);
       border:1px solid var(--c1);
@@ -222,27 +256,24 @@
     .tip:last-child{margin-bottom:0}
     .tip strong{color:var(--accent2)}
 
-    /* ─── Toast ─────────────────────────────────────── */
-    #toast{
-      position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
-      background:rgba(8,18,50,.97);border:1px solid var(--accent);
-      border-radius:20px;padding:10px 22px;
-      font-size:13px;color:var(--text);z-index:999;
-      opacity:0;transition:opacity .3s;white-space:nowrap;
-      pointer-events:none;
+    /* ─── Android Setup Guide ─── */
+    .code-block{
+      background:#030a1a;
+      border:1px solid var(--c1);
+      border-radius:8px;
+      padding:10px 12px;
+      font-family:monospace;
+      font-size:11px;
+      color:#7affb0;
+      margin:8px 0;
+      direction:ltr;
+      text-align:left;
+      overflow-x:auto;
+      line-height:1.7;
     }
-    #toast.show{opacity:1}
+    .code-label{font-size:10px;color:var(--dim);margin-bottom:4px;letter-spacing:1px}
 
-    /* ─── Loading spinner ───────────────────────────── */
-    .spin{
-      display:inline-block;width:16px;height:16px;
-      border:2px solid rgba(255,255,255,.2);
-      border-top-color:#fff;border-radius:50%;
-      animation:spin .75s linear infinite;vertical-align:middle;
-    }
-    @keyframes spin{to{transform:rotate(360deg)}}
-
-    /* ─── Copy result button ────────────────────────── */
+    /* ─── Result Actions ─── */
     .result-actions{display:none;gap:8px;margin-top:8px}
     .result-actions.show{display:flex}
     .copy-btn{
@@ -253,32 +284,64 @@
       letter-spacing:.5px;transition:.2s;
     }
     .copy-btn:active{background:var(--c2)}
-
-    /* ─── Footer ────────────────────────────────────── */
-    .foot{
-      text-align:center;padding:20px;
-      font-size:10px;color:var(--dim);letter-spacing:1px;
+    .retry-btn{
+      padding:9px 14px;border-radius:8px;
+      background:rgba(255,100,0,0.1);border:1px solid rgba(255,100,0,0.3);
+      color:#ff8040;font-family:'IBM Plex Arabic',sans-serif;
+      font-size:12px;cursor:pointer;transition:.2s;
     }
+    .retry-btn:active{background:rgba(255,100,0,0.2)}
+
+    /* ─── Toast ─── */
+    #toast{
+      position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+      background:rgba(8,18,50,.97);border:1px solid var(--accent);
+      border-radius:20px;padding:10px 22px;
+      font-size:13px;color:var(--text);z-index:999;
+      opacity:0;transition:opacity .3s;white-space:nowrap;
+      pointer-events:none;
+    }
+    #toast.show{opacity:1}
+
+    /* ─── Spinner ─── */
+    .spin{
+      display:inline-block;width:16px;height:16px;
+      border:2px solid rgba(255,255,255,.2);
+      border-top-color:#fff;border-radius:50%;
+      animation:spin .75s linear infinite;vertical-align:middle;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+
+    .foot{text-align:center;padding:20px;font-size:10px;color:var(--dim);letter-spacing:1px}
   </style>
 </head>
 <body>
 
-<!-- ══ Header ═══════════════════════════════════════════ -->
+<!-- ══ Header ═══ -->
 <header class="hd">
   <div class="logo">
-    <span class="logo-icon">🌐</span>
-    GAME TRANSLATOR
+    <span class="logo-icon">🌍</span>
+    WORLD TRANSLATOR
   </div>
-  <div class="logo-sub">مترجم الألعاب الاحترافي</div>
+  <div class="logo-sub">المترجم الاحترافي للألعاب</div>
   <div class="status-row">
     <div class="dot-live"></div>
-    الخدمة تعمل فوق كل التطبيقات
+    <span id="statusText">جاري فحص الاتصال...</span>
   </div>
 </header>
 
+<!-- ══ Network Status Bar ═══ -->
+<div id="netStatus">
+  <div class="nd"></div>
+  <span id="netLabel">فحص الشبكة...</span>
+</div>
+
+<!-- ══ Debug Banner ═══ -->
+<div id="debugBanner"></div>
+
 <div class="wrap">
 
-  <!-- ══ Language Settings ═══════════════════════════════ -->
+  <!-- ══ Language Settings ═══ -->
   <div class="card">
     <div class="card-ttl">⚙ إعداد اللغة</div>
     <div class="lang-row">
@@ -318,123 +381,344 @@
     <button class="save-btn" onclick="saveLangs()">💾 حفظ الإعدادات</button>
   </div>
 
-  <!-- ══ Manual Translate ═════════════════════════════════ -->
+  <!-- ══ Manual Translate ═══ -->
   <div class="card">
     <div class="card-ttl">⚡ ترجمة سريعة</div>
     <div class="paste-row">
       <textarea id="inputText" placeholder="اكتب أو الصق النص هنا…" dir="auto"></textarea>
       <div class="paste-btn" onclick="pasteClip()" title="لصق من الحافظة">📋</div>
     </div>
-    <button class="trans-btn" id="transBtn" onclick="translateNow()">🌐 ترجم الآن</button>
+    <button class="trans-btn" id="transBtn" onclick="translateNow()">🌍 ترجم الآن</button>
     <div class="result" id="resultBox" dir="rtl"></div>
     <div class="result-meta" id="resultMeta"></div>
     <div class="result-actions" id="resultActions">
       <button class="copy-btn" onclick="copyResult()">📋 نسخ الترجمة</button>
+      <button class="retry-btn" onclick="translateNow()">🔄 إعادة</button>
+    </div>
+    <!-- API Status Badges -->
+    <div class="api-badges" id="apiBadges" style="display:none">
+      <span class="badge wait" id="badge1">API-1</span>
+      <span class="badge wait" id="badge2">API-2</span>
+      <span class="badge wait" id="badge3">API-3</span>
     </div>
   </div>
 
-  <!-- ══ How to Use ════════════════════════════════════════ -->
+  <!-- ══ Android Setup Required ═══ -->
+  <div class="card">
+    <div class="card-ttl">🔧 إعدادات Android المطلوبة</div>
+
+    <div class="tip">
+      <strong>1️⃣ AndroidManifest.xml — صلاحية الإنترنت</strong>
+      <div class="code-label">أضف هذا قبل &lt;application&gt;</div>
+      <div class="code-block">&lt;uses-permission android:name="android.permission.INTERNET"/&gt;
+&lt;uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/&gt;</div>
+    </div>
+
+    <div class="tip">
+      <strong>2️⃣ network_security_config.xml — السماح بـ HTTPS</strong>
+      <div class="code-label">res/xml/network_security_config.xml</div>
+      <div class="code-block">&lt;?xml version="1.0" encoding="utf-8"?&gt;
+&lt;network-security-config&gt;
+  &lt;domain-config cleartextTrafficPermitted="false"&gt;
+    &lt;domain includeSubdomains="true"&gt;translate.googleapis.com&lt;/domain&gt;
+    &lt;domain includeSubdomains="true"&gt;clients5.google.com&lt;/domain&gt;
+    &lt;domain includeSubdomains="true"&gt;translate.google.com&lt;/domain&gt;
+  &lt;/domain-config&gt;
+&lt;/network-security-config&gt;</div>
+    </div>
+
+    <div class="tip">
+      <strong>3️⃣ AndroidManifest.xml — ربط network_security_config</strong>
+      <div class="code-block">android:networkSecurityConfig="@xml/network_security_config"</div>
+    </div>
+
+    <div class="tip">
+      <strong>4️⃣ WebViewActivity.java — الإعدادات الكاملة</strong>
+      <div class="code-block">WebSettings s = webView.getSettings();
+s.setJavaScriptEnabled(true);
+s.setDomStorageEnabled(true);
+s.setAllowFileAccess(false);
+s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+s.setCacheMode(WebSettings.LOAD_DEFAULT);
+
+// Android Bridge
+webView.addJavascriptInterface(
+  new AndroidClipboard(this), "AndroidClipboard"
+);
+
+// CORS fix — override shouldInterceptRequest
+webView.setWebViewClient(new WebViewClient() {
+  @Override
+  public WebResourceResponse shouldInterceptRequest(
+      WebView view, WebResourceRequest request) {
+    // Let all translate.googleapis.com through
+    return null;
+  }
+});</div>
+    </div>
+
+    <div class="tip">
+      <strong>5️⃣ AndroidClipboard Bridge — الكلاس الكامل</strong>
+      <div class="code-block">public class AndroidClipboard {
+  private Context ctx;
+  private SharedPreferences prefs;
+
+  public AndroidClipboard(Context c) {
+    ctx = c;
+    prefs = c.getSharedPreferences("wt_prefs", Context.MODE_PRIVATE);
+  }
+
+  @JavascriptInterface
+  public String getText() {
+    try {
+      ClipboardManager cm = (ClipboardManager)
+        ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+      if (cm.hasPrimaryClip()) {
+        ClipData.Item item = cm.getPrimaryClip().getItemAt(0);
+        return item.getText() != null ? item.getText().toString() : "";
+      }
+    } catch(Exception e) { return "ERROR:" + e.getMessage(); }
+    return "";
+  }
+
+  @JavascriptInterface
+  public void setText(String text) {
+    try {
+      ClipboardManager cm = (ClipboardManager)
+        ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+      cm.setPrimaryClip(ClipData.newPlainText("translation", text));
+    } catch(Exception e) {}
+  }
+
+  @JavascriptInterface
+  public void saveLanguages(String from, String to) {
+    prefs.edit().putString("from", from).putString("to", to).apply();
+  }
+
+  @JavascriptInterface
+  public String getFromLang() { return prefs.getString("from","auto"); }
+
+  @JavascriptInterface
+  public String getToLang()   { return prefs.getString("to","ar"); }
+
+  @JavascriptInterface
+  public boolean isNetworkAvailable() {
+    ConnectivityManager cm = (ConnectivityManager)
+      ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+    NetworkInfo ni = cm.getActiveNetworkInfo();
+    return ni != null && ni.isConnected();
+  }
+}</div>
+    </div>
+
+    <div class="tip">
+      <strong>6️⃣ Overlay Permission (Android 10+)</strong>
+      <div class="code-block">// في AndroidManifest.xml
+&lt;uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/&gt;
+
+// في الكود — طلب الإذن
+if (!Settings.canDrawOverlays(this)) {
+  Intent i = new Intent(
+    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+    Uri.parse("package:" + getPackageName()));
+  startActivityForResult(i, 1001);
+}</div>
+    </div>
+  </div>
+
+  <!-- ══ How to Use ═══ -->
   <div class="card">
     <div class="card-ttl">📖 كيف تستخدم التطبيق</div>
-
     <div class="step">
       <div class="snum">1</div>
       <div class="stxt">
         <strong>افتح أي لعبة أو تطبيق</strong>
-        الزر 🌐 يظهر فوق كل شيء — اسحبه لأي مكان تريده على الشاشة
+        الزر 🌍 يظهر فوق كل شيء — اسحبه لأي مكان تريده على الشاشة
       </div>
     </div>
-
     <div class="step">
       <div class="snum">2</div>
       <div class="stxt">
         <strong>انسخ النص (تحديد + نسخ)</strong>
-        حدد النص في اللعبة أو التطبيق أو الموقع واضغط نسخ — يدعم كل مصدر
+        حدد النص في اللعبة أو التطبيق واضغط نسخ
       </div>
     </div>
-
     <div class="step">
       <div class="snum">3</div>
       <div class="stxt">
-        <strong>اضغط الزر 🌐 مرة واحدة</strong>
-        تظهر اللوحة الشفافة أسفل الشاشة فوراً مع الترجمة الكاملة
+        <strong>اضغط الزر 🌍 مرة واحدة</strong>
+        تظهر اللوحة الشفافة فوراً مع الترجمة الكاملة
       </div>
     </div>
-
     <div class="step">
       <div class="snum">4</div>
       <div class="stxt">
         <strong>🤖 AUTO MODE — الترجمة التلقائية</strong>
-        اضغط الزر 🌐 ضغطاً <em style="color:#ffa040">طويلاً</em> (0.7 ثانية) لتفعيل الوضع التلقائي — أي نص تنسخه يُترجم تلقائياً دون أي ضغط إضافي
+        اضغط ضغطاً <em style="color:#ffa040">طويلاً</em> (0.7 ثانية) لتفعيل الوضع التلقائي
       </div>
     </div>
   </div>
 
-  <!-- ══ Tips ══════════════════════════════════════════════ -->
+  <!-- ══ Tips ═══ -->
   <div class="card">
     <div class="card-ttl">💡 نصائح احترافية</div>
-    <div class="tip"><strong>⇕ حجم اللوحة</strong> — اضغط ⇕ على اللوحة للتبديل بين 3 أحجام: صغير (سطر) / متوسط / كبير (8 أسطر)</div>
-    <div class="tip"><strong>⚙ تغيير اللغة أثناء اللعب</strong> — اضغط ⚙ على اللوحة مباشرة لتغيير اللغة دون الرجوع للتطبيق</div>
-    <div class="tip"><strong>✕ إغلاق اللوحة</strong> — اضغط ✕ أو اضغط الزر 🌐 مرة ثانية — اللوحة تختفي تلقائياً بعد 10 ثوانٍ</div>
-    <div class="tip"><strong>🔍 اللغة التلقائية</strong> — إذا ما تعرف لغة النص، اختر "تلقائي" وسيكتشفها Google Translate تلقائياً</div>
-    <div class="tip"><strong>⬤ AUTO شارة خضراء</strong> — عند تفعيل AUTO MODE تظهر نقطة خضراء على الزر وشارة AUTO على اللوحة — اضغطها لإيقاف الوضع التلقائي</div>
+    <div class="tip"><strong>⇕ حجم اللوحة</strong> — اضغط ⇕ للتبديل بين 3 أحجام</div>
+    <div class="tip"><strong>⚙ تغيير اللغة أثناء اللعب</strong> — اضغط ⚙ على اللوحة مباشرة</div>
+    <div class="tip"><strong>✕ إغلاق اللوحة</strong> — اضغط ✕ أو اضغط الزر 🌍 مرة ثانية</div>
+    <div class="tip"><strong>🔍 اللغة التلقائية</strong> — اختر "تلقائي" وسيكتشف Google اللغة</div>
+    <div class="tip"><strong>🔄 Fallback APIs</strong> — إذا فشل API الأول، يجرب الثاني والثالث تلقائياً</div>
+    <div class="tip"><strong>⚠ "Capture failed"</strong> — يعني إذن Overlay غير مفعّل. اذهب للإعدادات ← التطبيقات ← صلاحيات خاصة ← الظهور فوق التطبيقات</div>
   </div>
 
-</div><!-- /wrap -->
+</div>
 
-<div class="foot">مترجم الألعاب v5 • يعمل فوق كل التطبيقات والألعاب</div>
+<div class="foot">World Translator v6 • يعمل فوق كل التطبيقات والألعاب</div>
 <div id="toast"></div>
 
 <script>
-/* ── Android bridge ──────────────────────────────── */
+/* ══════════════════════════════════════════
+   WORLD TRANSLATOR v6 — Full Fixed Script
+   ══════════════════════════════════════════ */
+
+/* ── Android Bridge (safe wrapper) ────────────────── */
 const AB = window.AndroidClipboard || null;
 
-/* ── Load saved lang on start ────────────────────── */
-document.addEventListener('DOMContentLoaded', () => {
-  if (!AB) return;
-  const f = AB.getFromLang();
-  const t = AB.getToLang();
-  if (f) document.getElementById('fromLang').value = f;
-  if (t) document.getElementById('toLang').value   = t;
-});
-
-/* ── Swap languages ──────────────────────────────── */
-function swapLangs() {
-  const f = document.getElementById('fromLang');
-  const t = document.getElementById('toLang');
-  if (t.value === 'auto') return;
-  const tmp = f.value;
-  f.value = t.value;
-  t.value = (tmp === 'auto') ? 'en' : tmp;
+/* ── Debug Logger ─────────────────────────────────── */
+const LOG = [];
+function log(msg, type='info') {
+  const entry = `[${new Date().toLocaleTimeString()}] ${type.toUpperCase()}: ${msg}`;
+  LOG.push(entry);
+  console.log(entry);
+  if (type === 'error') showDebug(entry);
 }
 
-/* ── Save to SharedPreferences via bridge ────────── */
-function saveLangs() {
-  const f = document.getElementById('fromLang').value;
-  const t = document.getElementById('toLang').value;
-  if (f !== 'auto' && f === t) { showToast('⚠ لغتا المصدر والهدف متطابقتان'); return; }
-  if (AB) AB.saveLanguages(f, t);
-  showToast('✓ تم حفظ الإعدادات');
+function showDebug(msg) {
+  const b = document.getElementById('debugBanner');
+  b.innerHTML += msg + '<br>';
+  b.classList.add('show');
 }
 
-/* ── Paste from device clipboard ─────────────────── */
-function pasteClip() {
-  if (AB) {
-    const txt = AB.getText();
-    if (txt && txt.trim()) {
-      document.getElementById('inputText').value = txt;
-      showToast('✓ تم اللصق');
-    } else {
-      showToast('الحافظة فارغة');
-    }
-  } else {
-    navigator.clipboard && navigator.clipboard.readText().then(t => {
-      document.getElementById('inputText').value = t;
-    }).catch(() => showToast('تعذّر الوصول للحافظة'));
+/* ── Network Check ────────────────────────────────── */
+function updateNetStatus(online, label) {
+  const el = document.getElementById('netStatus');
+  const lb = document.getElementById('netLabel');
+  el.className = online ? '' : 'offline';
+  lb.textContent = label || (online ? 'متصل بالشبكة ✓' : 'غير متصل — تحقق من Wi-Fi أو البيانات');
+}
+
+async function checkNetwork() {
+  // Check via Android bridge first
+  if (AB && typeof AB.isNetworkAvailable === 'function') {
+    const ok = AB.isNetworkAvailable();
+    updateNetStatus(ok, ok ? 'الشبكة متاحة (Android) ✓' : 'لا يوجد اتصال (Android)');
+    document.getElementById('statusText').textContent = ok ? 'الخدمة تعمل فوق كل التطبيقات' : 'تحقق من اتصال الإنترنت';
+    return ok;
   }
+  // Fallback: navigator.onLine
+  const online = navigator.onLine;
+  updateNetStatus(online);
+  return online;
 }
 
-/* ── Manual translate ────────────────────────────── */
+/* ── Translation API Pool ─────────────────────────── */
+// 3 different endpoints as fallback chain
+const APIS = [
+  {
+    name: 'GTX',
+    call: async (text, from, to) => {
+      const q = encodeURIComponent(text.slice(0, 1000));
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from}&tl=${to}&dt=t&q=${q}`;
+      const res = await fetchWithTimeout(url, 8000);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      return data[0].map(p => (p && p[0]) ? p[0] : '').join('').trim();
+    }
+  },
+  {
+    name: 'GT-WEB',
+    call: async (text, from, to) => {
+      const q = encodeURIComponent(text.slice(0, 1000));
+      const url = `https://translate.google.com/translate_a/single?client=at&dt=t&dt=ld&dt=qca&dt=rm&dt=bd&dj=1&sl=${from}&tl=${to}&q=${q}`;
+      const res = await fetchWithTimeout(url, 8000, {
+        headers: { 'User-Agent': 'AndroidTranslate/5.3.0' }
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (data.sentences) return data.sentences.map(s => s.trans || '').join('').trim();
+      throw new Error('bad response');
+    }
+  },
+  {
+    name: 'CLIENTS5',
+    call: async (text, from, to) => {
+      const q = encodeURIComponent(text.slice(0, 500));
+      const url = `https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=${from}&tl=${to}&q=${q}`;
+      const res = await fetchWithTimeout(url, 8000);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      // clients5 returns array or string
+      if (typeof data === 'string') return data;
+      if (Array.isArray(data)) {
+        if (typeof data[0] === 'string') return data[0];
+        if (Array.isArray(data[0])) return data[0][0] || '';
+      }
+      throw new Error('bad clients5 response');
+    }
+  }
+];
+
+/* ── Fetch with Timeout ───────────────────────────── */
+function fetchWithTimeout(url, ms, opts = {}) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...opts, signal: ctrl.signal })
+    .finally(() => clearTimeout(id));
+}
+
+/* ── Translate with Retry + Fallback ─────────────── */
+async function translateWithFallback(text, from, to) {
+  const badges = document.getElementById('apiBadges');
+  badges.style.display = 'flex';
+
+  // Reset badges
+  ['badge1','badge2','badge3'].forEach((id,i) => {
+    const b = document.getElementById(id);
+    b.textContent = APIS[i].name;
+    b.className = 'badge wait';
+  });
+
+  for (let i = 0; i < APIS.length; i++) {
+    const badge = document.getElementById('badge' + (i+1));
+    badge.className = 'badge wait';
+    log(`Trying API ${APIS[i].name}...`);
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const result = await APIS[i].call(text, from, to);
+        if (result && result.length > 0) {
+          badge.className = 'badge ok';
+          badge.textContent = `${APIS[i].name} ✓`;
+          log(`Success with ${APIS[i].name} on attempt ${attempt}`);
+          return { result, apiName: APIS[i].name, attempt };
+        }
+      } catch (err) {
+        log(`${APIS[i].name} attempt ${attempt} failed: ${err.message}`, 'error');
+        if (attempt === 2) {
+          badge.className = 'badge fail';
+          badge.textContent = `${APIS[i].name} ✗`;
+        }
+        // Small wait before retry
+        if (attempt < 2) await sleep(500);
+      }
+    }
+  }
+
+  throw new Error('فشلت جميع الـ APIs — تحقق من الإنترنت أو إذن الشبكة في AndroidManifest');
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/* ── Main Translate Function ──────────────────────── */
 async function translateNow() {
   const text = document.getElementById('inputText').value.trim();
   if (!text) { showToast('⚠ أدخل نصاً أولاً'); return; }
@@ -449,65 +733,169 @@ async function translateNow() {
 
   btn.innerHTML = '<span class="spin"></span> جاري الترجمة…';
   btn.disabled  = true;
-  box.classList.remove('show');
+  box.className = 'result';
   actions.classList.remove('show');
-  box.style.color = '#e0ecff';
+
+  // Clear old debug
+  const dbg = document.getElementById('debugBanner');
+  dbg.innerHTML = '';
+  dbg.classList.remove('show');
+
+  // Network pre-check
+  const netOk = await checkNetwork();
+  if (!netOk) {
+    showError(box, '⚠ لا يوجد اتصال بالإنترنت. تحقق من Wi-Fi أو البيانات.');
+    btn.innerHTML = '🌍 ترجم الآن';
+    btn.disabled  = false;
+    actions.classList.add('show');
+    return;
+  }
 
   try {
-    const t0     = Date.now();
-    const result = await gtranslate(text, from, to);
-    const ms     = Date.now() - t0;
+    const t0 = Date.now();
+    const { result, apiName, attempt } = await translateWithFallback(text, from, to);
+    const ms = Date.now() - t0;
 
     box.textContent = result;
     box.classList.add('show');
     actions.classList.add('show');
-    meta.textContent = `⏱ ${(ms/1000).toFixed(1)}ث  •  ${text.length} حرف  •  Google Translate`;
+    meta.textContent = `⏱ ${(ms/1000).toFixed(1)}ث  •  ${text.length} حرف  •  ${apiName}  •  محاولة ${attempt}`;
 
-    if (AB) AB.setText(result);   // نسخ الترجمة للحافظة تلقائياً
+    // Auto-copy to clipboard via bridge
+    if (AB && typeof AB.setText === 'function') {
+      AB.setText(result);
+      log('Auto-copied to clipboard via Android bridge');
+    }
+
   } catch(err) {
-    box.textContent = '⚠ خطأ في الترجمة: ' + err.message;
-    box.classList.add('show');
-    box.style.color = '#ff4060';
+    log('All APIs failed: ' + err.message, 'error');
+    showError(box, '⚠ ' + err.message);
+    actions.classList.add('show');
+    meta.textContent = 'فشلت الترجمة — راجع قسم إعدادات Android أعلاه';
   } finally {
-    btn.innerHTML = '🌐 ترجم الآن';
+    btn.innerHTML = '🌍 ترجم الآن';
     btn.disabled  = false;
   }
 }
 
-/* ── Google Translate (gtx — no API key) ─────────── */
-async function gtranslate(text, from, to) {
-  if (text.length > 1000) text = text.slice(0, 1000);
-  const q   = encodeURIComponent(text);
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${from}&tl=${to}&dt=t&q=${q}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const data = await res.json();
-  return data[0].map(p => (p && p[0]) ? p[0] : '').join('').trim();
+function showError(box, msg) {
+  box.textContent = msg;
+  box.className = 'result show error';
 }
 
-/* ── Copy translation result ─────────────────────── */
+/* ── Swap Languages ───────────────────────────────── */
+function swapLangs() {
+  const f = document.getElementById('fromLang');
+  const t = document.getElementById('toLang');
+  if (t.value === 'auto') return;
+  const tmp = f.value;
+  f.value = t.value;
+  t.value = (tmp === 'auto') ? 'en' : tmp;
+}
+
+/* ── Save Languages ───────────────────────────────── */
+function saveLangs() {
+  const f = document.getElementById('fromLang').value;
+  const t = document.getElementById('toLang').value;
+  if (f !== 'auto' && f === t) { showToast('⚠ لغتا المصدر والهدف متطابقتان'); return; }
+  if (AB && typeof AB.saveLanguages === 'function') {
+    AB.saveLanguages(f, t);
+  } else {
+    // Fallback to localStorage if no bridge
+    try { localStorage.setItem('wt_from', f); localStorage.setItem('wt_to', t); } catch(e){}
+  }
+  showToast('✓ تم حفظ الإعدادات');
+}
+
+/* ── Paste from Clipboard ─────────────────────────── */
+async function pasteClip() {
+  if (AB && typeof AB.getText === 'function') {
+    try {
+      const txt = AB.getText();
+      if (txt && txt.startsWith('ERROR:')) {
+        showToast('⚠ خطأ في Bridge: ' + txt);
+        log('Bridge getText error: ' + txt, 'error');
+        return;
+      }
+      if (txt && txt.trim()) {
+        document.getElementById('inputText').value = txt;
+        showToast('✓ تم اللصق');
+      } else {
+        showToast('الحافظة فارغة');
+      }
+    } catch(e) {
+      log('pasteClip bridge error: ' + e.message, 'error');
+      showToast('⚠ تعذر اللصق عبر Bridge');
+    }
+  } else {
+    try {
+      const txt = await navigator.clipboard.readText();
+      document.getElementById('inputText').value = txt;
+      showToast('✓ تم اللصق');
+    } catch(e) {
+      showToast('⚠ تعذّر الوصول للحافظة');
+    }
+  }
+}
+
+/* ── Copy Result ──────────────────────────────────── */
 function copyResult() {
   const text = document.getElementById('resultBox').textContent.trim();
-  if (!text) return;
-  if (AB) {
+  if (!text || text.startsWith('⚠')) return;
+  if (AB && typeof AB.setText === 'function') {
     AB.setText(text);
     showToast('✓ تم نسخ الترجمة');
   } else {
     navigator.clipboard && navigator.clipboard.writeText(text)
       .then(() => showToast('✓ تم نسخ الترجمة'))
-      .catch(() => showToast('تعذّر النسخ'));
+      .catch(() => showToast('⚠ تعذّر النسخ'));
   }
 }
 
-/* ── Toast ───────────────────────────────────────── */
+/* ── Toast ────────────────────────────────────────── */
 let _toastTimer;
-function showToast(msg, ms=2200) {
+function showToast(msg, ms=2400) {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.classList.add('show');
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => t.classList.remove('show'), ms);
 }
+
+/* ── Init ─────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  log('World Translator v6 initialized');
+
+  // Load saved languages
+  if (AB) {
+    try {
+      const f = AB.getFromLang && AB.getFromLang();
+      const t = AB.getToLang   && AB.getToLang();
+      if (f) document.getElementById('fromLang').value = f;
+      if (t) document.getElementById('toLang').value   = t;
+      log('Loaded saved languages from Android bridge');
+    } catch(e) {
+      log('Bridge load error: ' + e.message, 'error');
+    }
+  } else {
+    // Fallback from localStorage
+    try {
+      const f = localStorage.getItem('wt_from');
+      const t = localStorage.getItem('wt_to');
+      if (f) document.getElementById('fromLang').value = f;
+      if (t) document.getElementById('toLang').value   = t;
+    } catch(e) {}
+    log('No Android bridge detected — running in browser mode');
+    showDebug('⚠ AndroidClipboard bridge غير موجود — تأكد من addJavascriptInterface في Java');
+  }
+
+  // Network check on load
+  checkNetwork();
+});
+
+// Online/offline listeners
+window.addEventListener('online',  () => updateNetStatus(true));
+window.addEventListener('offline', () => updateNetStatus(false, 'انقطع الاتصال!'));
 </script>
 </body>
 </html>
