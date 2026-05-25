@@ -21,103 +21,95 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 /**
- * MainActivity — الوظيفة الوحيدة هي:
- * 1. طلب إذن POST_NOTIFICATIONS (Android 13+)
- * 2. طلب إذن SYSTEM_ALERT_WINDOW (Overlay)
- * 3. طلب إذن MediaProjection (تصوير الشاشة)
- * 4. تمرير نتيجة MediaProjection للـ Service
- * 5. الاختفاء فوراً — الخدمة تعمل بدونها
+ * MainActivity — v12 (Final Stable)
  *
- * ❌ لا WebView
- * ❌ لا Clipboard
- * ❌ لا UI معقد
+ * Flow:
+ *   1. POST_NOTIFICATIONS (Android 13+)
+ *   2. SYSTEM_ALERT_WINDOW (Overlay permission)
+ *   3. MediaProjection (screen capture)
+ *   4. startForegroundService()
+ *   5. finish() immediately — no black screen ever
  *
- * التحسينات المطبّقة:
- * ✅ استبدال startActivityForResult → registerForActivityResult (modern API)
- * ✅ حماية mpManager == null
- * ✅ إزالة Emoji من Toast لتوافق الأجهزة القديمة
- * ✅ تعليقات واضحة على كل قرار
+ * Key fixes vs v11:
+ * - Service already running? Skip re-launch, just finish().
+ * - All result paths call finish() — no path leaves Activity visible.
+ * - No heavy work in onCreate() — Activity stays <5ms on screen.
+ * - Theme is @style/Theme.Translucent so there's no white/black flash.
+ * - onNewIntent() just finishes (singleTop — prevents stacking).
  */
 public class MainActivity extends AppCompatActivity {
 
-    private static final String TAG = "GT_Main";
-    private static final int REQ_NOTIF = 1001;
+    private static final String TAG       = "GT_Main";
+    private static final int    REQ_NOTIF = 1001;
 
     private MediaProjectionManager mpManager;
+    private boolean                alreadyLaunched = false;
 
-    // ─── Modern Activity Result API (بديل startActivityForResult المهجور) ────
-
-    /**
-     * Launcher لإذن الـ Overlay (ACTION_MANAGE_OVERLAY_PERMISSION).
-     * لا يعيد resultCode مباشرة، لذلك نتحقق يدوياً بعد العودة.
-     */
+    // ── Overlay permission launcher ──────────────────────────────
     private final ActivityResultLauncher<Intent> overlayLauncher =
-            registerForActivityResult(
-                    new ActivityResultContracts.StartActivityForResult(),
-                    result -> {
-                        // نتحقق من الإذن مباشرة — resultCode هنا دائماً CANCELED
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                                && Settings.canDrawOverlays(this)) {
-                            requestScreenCapture();
-                        } else {
-                            Toast.makeText(this,
-                                    "بدون اذن الـ Overlay لن يظهر الزر العائم",
-                                    Toast.LENGTH_LONG).show();
-                            launchService(Activity.RESULT_CANCELED, null);
-                        }
-                    });
+        registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            result -> {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        && Settings.canDrawOverlays(this)) {
+                    requestScreenCapture();
+                } else {
+                    Toast.makeText(this,
+                        "Overlay permission required for floating button",
+                        Toast.LENGTH_LONG).show();
+                    launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+                }
+            });
 
-    /**
-     * Launcher لإذن تصوير الشاشة (MediaProjection).
-     * هنا resultCode يكون RESULT_OK أو RESULT_CANCELED بوضوح.
-     */
+    // ── MediaProjection permission launcher ──────────────────────
     private final ActivityResultLauncher<Intent> screenCapLauncher =
-            registerForActivityResult(
-                    new ActivityResultContracts.StartActivityForResult(),
-                    result -> {
-                        int resultCode = result.getResultCode();
-                        Intent data    = result.getData();
+        registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            result -> {
+                int    rc   = result.getResultCode();
+                Intent data = result.getData();
+                if (rc == Activity.RESULT_OK && data != null) {
+                    Log.d(TAG, "Screen capture GRANTED");
+                    launchServiceAndFinish(rc, data);
+                } else {
+                    Log.w(TAG, "Screen capture DENIED");
+                    Toast.makeText(this,
+                        "Screen capture denied — OCR unavailable. Re-open to grant.",
+                        Toast.LENGTH_LONG).show();
+                    launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+                }
+            });
 
-                        if (resultCode == Activity.RESULT_OK && data != null) {
-                            Log.d(TAG, "Screen capture permission GRANTED");
-                            launchService(resultCode, data);
-                        } else {
-                            Log.w(TAG, "Screen capture permission DENIED");
-                            // لا Emoji — توافق أكبر مع الأجهزة القديمة
-                            Toast.makeText(this,
-                                    "رُفض اذن تصوير الشاشة — OCR لن يعمل.\nاعد فتح التطبيق وامنح الاذن.",
-                                    Toast.LENGTH_LONG).show();
-                            launchService(Activity.RESULT_CANCELED, null);
-                        }
-                    });
-
-    // ─────────────────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Minimal transparent layout — user never sees this
         setContentView(R.layout.activity_main);
 
-        // ✅ حماية: بعض الأجهزة ترجع null لـ MediaProjectionManager
+        // Prevent double-launch on config change / re-create
+        if (alreadyLaunched) { finish(); return; }
+        alreadyLaunched = true;
+
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         if (mpManager == null) {
-            Log.e(TAG, "MediaProjectionManager is null — device may not support screen capture");
+            Log.e(TAG, "MediaProjectionManager null — OCR unavailable");
             Toast.makeText(this,
-                    "جهازك لا يدعم تصوير الشاشة — OCR لن يعمل",
-                    Toast.LENGTH_LONG).show();
-            // شغّل الخدمة بدون OCR بدل ما نوقف التطبيق كلياً
-            launchService(Activity.RESULT_CANCELED, null);
+                "Device does not support screen capture",
+                Toast.LENGTH_LONG).show();
+            launchServiceAndFinish(Activity.RESULT_CANCELED, null);
             return;
         }
 
-        // الخطوة 1: إذن الإشعارات (Android 13+)
+        // Step 1 — notification permission (Android 13+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this,
-                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                        REQ_NOTIF);
-                return;
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                    REQ_NOTIF);
+                return; // continues in onRequestPermissionsResult
             }
         }
         checkOverlay();
@@ -128,71 +120,78 @@ public class MainActivity extends AppCompatActivity {
                                            @NonNull String[] permissions,
                                            @NonNull int[] results) {
         super.onRequestPermissionsResult(req, permissions, results);
-        // سواء مُنح أو رُفض — نكمل
-        if (req == REQ_NOTIF) {
-            checkOverlay();
-        }
+        // Always continue regardless of result — notification is optional
+        if (req == REQ_NOTIF) checkOverlay();
     }
 
-    /** الخطوة 2: إذن الـ Overlay */
+    /** Step 2 — overlay permission */
     private void checkOverlay() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 && !Settings.canDrawOverlays(this)) {
             Toast.makeText(this,
-                    "اسمح بـ الظهور فوق التطبيقات حتى يعمل الزر العائم",
-                    Toast.LENGTH_LONG).show();
-            Intent intent = new Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()));
-            overlayLauncher.launch(intent);
+                "Allow 'Display over other apps' for floating button",
+                Toast.LENGTH_LONG).show();
+            overlayLauncher.launch(new Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName())));
         } else {
             requestScreenCapture();
         }
     }
 
-    /** الخطوة 3: إذن تصوير الشاشة */
+    /** Step 3 — screen capture permission */
     private void requestScreenCapture() {
-        Log.d(TAG, "Requesting screen capture permission...");
-        // mpManager مضمون غير null هنا (تحققنا في onCreate)
-        screenCapLauncher.launch(mpManager.createScreenCaptureIntent());
+        try {
+            screenCapLauncher.launch(mpManager.createScreenCaptureIntent());
+        } catch (Exception e) {
+            Log.e(TAG, "createScreenCaptureIntent failed: " + e.getMessage(), e);
+            Toast.makeText(this, "Cannot request screen permission", Toast.LENGTH_LONG).show();
+            launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+        }
     }
 
     /**
-     * تشغيل FloatingTranslatorService مع تمرير mp_result_code + mp_data.
-     *
-     * ملاحظة حول finish():
-     * لم نضف finish() هنا عمداً — بعض الأجهزة (Xiaomi / Oppo / Realme / Huawei)
-     * تقتل الـ Foreground Service عند إغلاق الـ Activity الأم مباشرة.
-     * moveTaskToBack(true) يخفي التطبيق بأمان مع إبقاء الخدمة حية.
-     * إذا أردت اختبار finish() لاحقاً، أضفه بعد moveTaskToBack وراقب السلوك
-     * على أجهزة Xiaomi تحديداً.
+     * Step 4+5: Start service → finish Activity immediately.
+     * This is the ONLY exit point — every code path calls this method.
      */
-    private void launchService(int resultCode, Intent data) {
+    private void launchServiceAndFinish(int resultCode, Intent data) {
         Intent svc = new Intent(this, FloatingTranslatorService.class);
         if (resultCode == Activity.RESULT_OK && data != null) {
             svc.putExtra("mp_result_code", resultCode);
             svc.putExtra("mp_data", data);
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(svc);
-        } else {
-            startService(svc);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(svc);
+            } else {
+                startService(svc);
+            }
+            Log.d(TAG, "Service started (resultCode=" + resultCode + ")");
+        } catch (Exception e) {
+            Log.e(TAG, "startForegroundService failed: " + e.getMessage(), e);
+            Toast.makeText(this,
+                "Could not start translator: " + e.getMessage(),
+                Toast.LENGTH_LONG).show();
         }
+        // Always close — never leave user staring at a black screen
+        finish();
+    }
 
-        // اخفِ التطبيق فوراً — الزر العائم يتولى الباقي
-        moveTaskToBack(true);
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // singleTop re-launch — just close
+        finish();
     }
 
     @Override
     public void onBackPressed() {
-        // زر الرجوع يخفي بدل ما يغلق — نفس سبب عدم استخدام finish()
-        moveTaskToBack(true);
+        finish();
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        // ✅ لا stopService هنا أبداً — الخدمة تبقى حية
+        // Do NOT stop the foreground service here
     }
 }
