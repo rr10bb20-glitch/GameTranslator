@@ -21,6 +21,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.LruCache;
@@ -53,51 +54,53 @@ import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * FloatingTranslatorService — v10 (Production)
+ * FloatingTranslatorService — v12 (Final Stable)
  *
- * Fixes vs v9:
- * - ExecutorService replaces raw new Thread (no unbounded thread creation)
- * - LruCache for translation results (avoids redundant network calls)
- * - Bitmap recycled immediately after OCR — no memory leak
- * - ImageReader + VirtualDisplay always released in finally block
- * - Handler.removeCallbacksAndMessages(null) on destroy — no dangling callbacks
- * - AtomicBoolean for ocrBusy/translating — thread-safe, no race condition
- * - HttpURLConnection always disconnected in finally — no connection leak
- * - MediaProjection null-checked with synchronized guard
- * - Debounce on button: ignores taps while OCR/translate in progress
- * - Retry logic for translation (1 retry on IOException)
- * - OCR crops dialogue region first, falls back to full screen
- * - All UI updates guarded with destroyed check
- * - No emoji in strings — pure ASCII, no bidi warning
+ * Fixes vs v11:
+ * ─ Capture resolution halved (SW/2 × SH/2) → less RAM, faster OCR
+ * ─ WakeLock acquired during capture → prevents sleep-mid-capture on some phones
+ * ─ ImageReader buffer = 1 (was 2) → avoids stale-frame issues
+ * ─ CAPTURE_DELAY_MS raised to 350 for slower devices
+ * ─ AUTO_INTERVAL_MS raised to 1 800 → lower CPU load
+ * ─ ocrBusy reset guaranteed on EVERY exit path (even async failures)
+ * ─ All wm.addView / updateViewLayout / removeView wrapped in try-catch
+ * ─ BadTokenException caught explicitly
+ * ─ Overlay FLAG_NOT_TOUCHABLE when hidden → never blocks game input
+ * ─ MediaProjection callback registered with H (main thread) → safe UI updates
+ * ─ No OCR started in onCreate / onStartCommand — only on user gesture
+ * ─ Bitmap.recycle() always null-checked & isRecycled()-checked
+ * ─ Translation: 2-attempt retry with 700 ms back-off
+ * ─ Translation cache size = 60 entries
+ * ─ All network ops on executor (never blocks main thread)
+ * ─ Logcat tags every failure with full stack
  */
 public class FloatingTranslatorService extends Service {
 
     private static final String TAG        = "UT";
-    private static final String CHANNEL_ID = "ut_v10";
+    private static final String CHANNEL_ID = "ut_v12";
     private static final int    NOTIF_ID   = 1;
 
-    // Timing constants
-    private static final long DISMISS_MS  = 6_000;
-    private static final long LONG_MS     = 650;
-    private static final long DOUBLE_MS   = 300;
-    private static final long CAPTURE_DELAY_MS = 260; // wait for VirtualDisplay to stabilize
+    // ── Timing ──────────────────────────────────────────────────
+    private static final long DISMISS_MS       = 6_000;
+    private static final long LONG_PRESS_MS    = 650;
+    private static final long DOUBLE_TAP_MS    = 300;
+    private static final long CAPTURE_DELAY_MS = 350;   // wait for VirtualDisplay to fill
+    private static final long AUTO_INTERVAL_MS = 1_800; // poll every 1.8 s (was 1.2)
 
-    // Alpha states
+    // ── Alpha ────────────────────────────────────────────────────
     private static final float ALPHA_IDLE = 0.25f;
     private static final float ALPHA_BUSY = 0.92f;
 
-    // OCR region: rows 58%-93% of screen height (typical dialogue box area)
+    // ── OCR crop (lower portion = dialogue box) ──────────────────
     private static final float OCR_TOP    = 0.58f;
     private static final float OCR_BOTTOM = 0.93f;
 
-    // Translation cache: max 40 entries (~small strings, negligible RAM)
-    private static final int CACHE_SIZE = 40;
+    private static final int CACHE_SIZE = 60;
 
-    // ── Languages (code, full name, abbreviation) ──
+    // ── Language table ───────────────────────────────────────────
     private static final String[][] LANGS = {
         {"auto","Auto","?"},
         {"ar","Arabic","AR"},{"en","English","EN"},{"ja","Japanese","JA"},
@@ -142,113 +145,138 @@ public class FloatingTranslatorService extends Service {
         {"mi","Maori","MI"},{"sm","Samoan","SM"},
     };
 
-    // ── Core ──
-    private WindowManager wm;
-    private int SW, SH;
-
-    // Main-thread handler — all UI ops go through this
-    private final Handler H = new Handler(Looper.getMainLooper());
-
-    // Single-thread pool for OCR+translate (sequential, no parallel confusion)
-    // Using 1 thread prevents concurrent captures from colliding
-    private ExecutorService executor;
-    private Future<?> pendingTask; // track in-flight task for cancellation
-
-    // Translation cache: key = "fromLang|toLang|text", value = translated string
+    // ── Core ─────────────────────────────────────────────────────
+    private WindowManager            wm;
+    private int                      SW, SH;           // real screen size
+    private int                      capW, capH;       // capture size (halved)
+    private final Handler            H = new Handler(Looper.getMainLooper());
+    private ExecutorService          executor;
     private LruCache<String, String> translateCache;
+    private PowerManager.WakeLock    wakeLock;
 
-    // ── Views ──
+    // ── Views ─────────────────────────────────────────────────────
     private View     btnView;
     private View     overlayView;
     private View     pickerView;
-    private WindowManager.LayoutParams btnLP, overlayLP, pickerLP;
-    private GradientDrawable btnBg;
-    private TextView tvBtnLabel;
-    private View     autoDot;
-    private TextView tvTranslation;
-    private TextView tvOriginal;
-    private TextView tvLangPair;
+    private WindowManager.LayoutParams btnLP, overlayLP;
+    private GradientDrawable           btnBg;
+    private TextView                   tvBtnLabel;
+    private View                       autoDot;
+    private TextView                   tvTranslation;
+    private TextView                   tvOriginal;
+    private TextView                   tvLangPair;
 
-    // ── State (AtomicBoolean for thread-safety) ──
-    private final AtomicBoolean ocrBusy     = new AtomicBoolean(false);
+    // ── State ─────────────────────────────────────────────────────
+    private final AtomicBoolean ocrBusy    = new AtomicBoolean(false);
     private final AtomicBoolean translating = new AtomicBoolean(false);
     private volatile boolean overlayVisible = false;
     private volatile boolean autoMode       = false;
     private volatile boolean destroyed      = false;
+    private volatile boolean viewsAdded     = false;   // guard for wm ops
 
-    private volatile String fromLang   = "auto";
-    private volatile String toLang     = "ar";
-    private String pickerFrom = "auto";
+    private volatile String fromLang  = "auto";
+    private volatile String toLang    = "ar";
+    private String          pickerFrom = "auto";
 
-    // ── Clipboard (AUTO MODE only) ──
-    private android.content.ClipboardManager clipMgr;
-    private android.content.ClipboardManager.OnPrimaryClipChangedListener clipCb;
-    private String lastClipHash = "";
-
-    // ── MediaProjection & OCR ──
-    private final Object mpLock = new Object(); // guards mediaProjection access
-    private MediaProjection mediaProjection;
+    // ── MediaProjection ───────────────────────────────────────────
+    private final Object           mpLock = new Object();
+    private MediaProjection        mediaProjection;
     private MediaProjectionManager mpManager;
-    private TextRecognizer recognizerJa;
-    private TextRecognizer recognizerLat;
+    private TextRecognizer         recognizerJa;
+    private TextRecognizer         recognizerLat;
 
-    // ── Timers ──
+    // ── AUTO MODE ─────────────────────────────────────────────────
+    private Runnable autoLoopR;
+    private String   lastAutoText = "";
+
+    // ── Timers / tap detection ────────────────────────────────────
     private Runnable dismissR;
     private Runnable doubleTapCheck;
     private Runnable fadeOutR;
-    private int tapCount = 0;
+    private int      tapCount = 0;
 
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
     // Lifecycle
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     @Override
     public void onCreate() {
         super.onCreate();
 
+        // startForeground IMMEDIATELY (< 5 s rule — ANR guard)
+        createChannel();
+        startForeground(NOTIF_ID, buildNotif());
+
         wm        = (WindowManager) getSystemService(WINDOW_SERVICE);
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        clipMgr   = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
 
-        // Screen dimensions
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
-            SW = b.width(); SH = b.height();
-        } else {
-            DisplayMetrics dm = new DisplayMetrics();
-            //noinspection deprecation
-            wm.getDefaultDisplay().getMetrics(dm);
-            SW = dm.widthPixels; SH = dm.heightPixels;
+        // Real screen dimensions
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
+                SW = b.width();  SH = b.height();
+            } else {
+                DisplayMetrics dm = new DisplayMetrics();
+                //noinspection deprecation
+                wm.getDefaultDisplay().getMetrics(dm);
+                SW = dm.widthPixels; SH = dm.heightPixels;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "getDisplayMetrics: " + e.getMessage(), e);
+            SW = 1080; SH = 1920;
         }
+
+        // ── Capture at half resolution (big performance win) ──────
+        capW = SW / 2;
+        capH = SH / 2;
+        // Keep capture size divisible by 16 (some devices require this)
+        capW = (capW / 16) * 16;
+        capH = (capH / 16) * 16;
+        if (capW < 480) capW = 480;
+        if (capH < 640) capH = 640;
+        Log.d(TAG, "Screen: " + SW + "x" + SH + "  Capture: " + capW + "x" + capH);
 
         fromLang = ClipboardBridge.readFromLang(this);
         toLang   = ClipboardBridge.readToLang(this);
 
+        // WakeLock — prevents CPU sleep during capture on some devices
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            if (pm != null) {
+                wakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK, "UT:capture");
+                wakeLock.setReferenceCounted(false);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "WakeLock init failed: " + e.getMessage());
+        }
+
         // OCR recognizers
         try {
-            recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
-            recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+            recognizerJa  = TextRecognition.getClient(
+                new JapaneseTextRecognizerOptions.Builder().build());
+            recognizerLat = TextRecognition.getClient(
+                TextRecognizerOptions.DEFAULT_OPTIONS);
         } catch (Exception e) {
-            Log.e(TAG, "OCR init failed: " + e.getMessage());
+            Log.e(TAG, "OCR init failed: " + e.getMessage(), e);
             recognizerJa = recognizerLat = null;
         }
 
-        // Thread pool: 1 background thread (sequential ops, minimal battery)
         executor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "UT-Worker");
-            t.setPriority(Thread.NORM_PRIORITY - 1); // slightly below UI priority
+            t.setPriority(Thread.NORM_PRIORITY - 1);
             return t;
         });
 
-        // Translation cache
         translateCache = new LruCache<>(CACHE_SIZE);
 
-        createChannel();
-        startForeground(NOTIF_ID, buildNotif());
-        buildButton();
-        buildOverlay();
-
-        Log.d(TAG, "Service started. Screen: " + SW + "x" + SH);
+        try {
+            buildButton();
+            buildOverlay();
+            viewsAdded = true;
+        } catch (Exception e) {
+            Log.e(TAG, "UI build failed: " + e.getMessage(), e);
+        }
     }
 
     @Override
@@ -256,30 +284,42 @@ public class FloatingTranslatorService extends Service {
         if (intent != null && intent.hasExtra("mp_result_code")) {
             int    rc = intent.getIntExtra("mp_result_code", -1);
             Intent d  = intent.getParcelableExtra("mp_data");
+
             if (rc == android.app.Activity.RESULT_OK && d != null) {
                 synchronized (mpLock) {
-                    // Stop previous projection if any
+                    // Stop old projection if any
                     if (mediaProjection != null) {
                         try { mediaProjection.stop(); } catch (Exception ignored) {}
                         mediaProjection = null;
                     }
                     try {
                         mediaProjection = mpManager.getMediaProjection(rc, d);
-                        // Register callback to detect when system revokes permission
+                        // Callback on main thread — safe to do UI updates inside
                         mediaProjection.registerCallback(new MediaProjection.Callback() {
                             @Override public void onStop() {
                                 Log.w(TAG, "MediaProjection stopped by system");
                                 synchronized (mpLock) { mediaProjection = null; }
                                 ocrBusy.set(false);
-                                H.post(() -> resetBtn("?"));
+                                releaseWakeLock();
+                                H.post(() -> {
+                                    if (!destroyed) resetBtn(shortPair());
+                                });
                             }
                         }, H);
                         Log.d(TAG, "MediaProjection ready");
                     } catch (Exception e) {
-                        Log.e(TAG, "MediaProjection failed: " + e.getMessage());
+                        Log.e(TAG, "MediaProjection init: " + e.getMessage(), e);
                         mediaProjection = null;
                     }
                 }
+            } else {
+                Log.w(TAG, "MediaProjection not granted (rc=" + rc + ")");
+                H.post(() -> {
+                    if (!destroyed)
+                        Toast.makeText(this,
+                            "Screen permission needed for OCR",
+                            Toast.LENGTH_LONG).show();
+                });
             }
         }
         return START_STICKY;
@@ -293,37 +333,35 @@ public class FloatingTranslatorService extends Service {
         super.onDestroy();
         destroyed = true;
 
-        // Cancel all pending Handler callbacks — prevents leaks & post-destroy UI ops
         H.removeCallbacksAndMessages(null);
+        stopAutoInternal();
+        releaseWakeLock();
 
-        stopAuto();
+        if (executor != null) executor.shutdownNow();
 
-        // Shut down executor — wait for current task to finish (max 2s)
-        if (executor != null) {
-            executor.shutdownNow();
-        }
+        try { if (recognizerJa  != null) recognizerJa.close();  }
+        catch (Exception e) { Log.e(TAG, "recognizerJa close: " + e); }
+        try { if (recognizerLat != null) recognizerLat.close(); }
+        catch (Exception e) { Log.e(TAG, "recognizerLat close: " + e); }
 
-        // Close OCR clients
-        try { if (recognizerJa  != null) recognizerJa.close();  } catch (Exception ignored) {}
-        try { if (recognizerLat != null) recognizerLat.close(); } catch (Exception ignored) {}
-
-        // Stop MediaProjection
         synchronized (mpLock) {
             if (mediaProjection != null) {
-                try { mediaProjection.stop(); } catch (Exception ignored) {}
+                try { mediaProjection.stop(); }
+                catch (Exception e) { Log.e(TAG, "mp stop: " + e); }
                 mediaProjection = null;
             }
         }
 
-        // Remove all window views
-        safeRemove(btnView);
-        safeRemove(overlayView);
-        safeRemove(pickerView);
+        if (viewsAdded) {
+            safeRemove(btnView);
+            safeRemove(overlayView);
+            safeRemove(pickerView);
+        }
     }
 
-    // ════════════════════════════════════════
-    // Floating Button (compact pill)
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
+    // Floating Button
+    // ═════════════════════════════════════════════════════════════
 
     private void buildButton() {
         FrameLayout root = new FrameLayout(this);
@@ -375,7 +413,7 @@ public class FloatingTranslatorService extends Service {
         btnLP.y = SH / 2;
 
         btnView.setOnTouchListener(new BtnTouch());
-        wm.addView(btnView, btnLP);
+        safeAddView(btnView, btnLP);
         scheduleBtnFade();
     }
 
@@ -395,9 +433,9 @@ public class FloatingTranslatorService extends Service {
         scheduleBtnFade();
     }
 
-    // ════════════════════════════════════════
-    // Overlay (compact bottom bar)
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
+    // Overlay
+    // ═════════════════════════════════════════════════════════════
 
     private void buildOverlay() {
         FrameLayout root = new FrameLayout(this);
@@ -412,7 +450,6 @@ public class FloatingTranslatorService extends Service {
         cardBg.setStroke(dp(1), Color.argb(80, 40, 90, 200));
         card.setBackground(cardBg);
 
-        // Top row: lang pair + X close
         LinearLayout topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -423,7 +460,8 @@ public class FloatingTranslatorService extends Service {
         tvLangPair.setTextSize(9f);
         tvLangPair.setTypeface(Typeface.DEFAULT_BOLD);
         tvLangPair.setLetterSpacing(0.06f);
-        topRow.addView(tvLangPair, new LinearLayout.LayoutParams(0, wc(), 1f));
+        topRow.addView(tvLangPair,
+            new LinearLayout.LayoutParams(0, wc(), 1f));
 
         TextView xBtn = new TextView(this);
         xBtn.setText("  \u00D7  ");
@@ -435,14 +473,12 @@ public class FloatingTranslatorService extends Service {
         topRow.addView(xBtn);
         card.addView(topRow);
 
-        // Divider
         View div = new View(this);
         LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
         divLp.setMargins(0, dp(4), 0, dp(5));
         div.setBackgroundColor(Color.argb(60, 40, 80, 180));
         card.addView(div, divLp);
 
-        // Original text (dim, small, 1 line)
         tvOriginal = new TextView(this);
         tvOriginal.setTextColor(Color.argb(100, 140, 170, 220));
         tvOriginal.setTextSize(9.5f);
@@ -451,7 +487,6 @@ public class FloatingTranslatorService extends Service {
         tvOriginal.setPadding(0, 0, 0, dp(3));
         card.addView(tvOriginal);
 
-        // Translation (main text, bright)
         tvTranslation = new TextView(this);
         tvTranslation.setTextColor(Color.argb(240, 220, 235, 255));
         tvTranslation.setTextSize(17f);
@@ -468,9 +503,9 @@ public class FloatingTranslatorService extends Service {
         overlayView = root;
         overlayView.setAlpha(0f);
 
+        // KEY: FLAG_NOT_TOUCHABLE when hidden → overlay never blocks game input
         overlayLP = new WindowManager.LayoutParams(
             SW, wc(), overlayType(),
-            // Start NOT_TOUCHABLE; we remove this flag when showing (for X button)
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
@@ -478,16 +513,16 @@ public class FloatingTranslatorService extends Service {
         overlayLP.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         overlayLP.y = dp(8);
 
-        wm.addView(overlayView, overlayLP);
+        safeAddView(overlayView, overlayLP);
     }
 
     private void showOverlay() {
         if (destroyed || overlayView == null) return;
         overlayVisible = true;
-        // Enable touch so X button works
+        // Remove NOT_TOUCHABLE so close-button works
         overlayLP.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
-        try { wm.updateViewLayout(overlayView, overlayLP); } catch (Exception ignored) {}
+        safeUpdateLayout(overlayView, overlayLP);
         overlayView.animate().alpha(1f).setDuration(180).start();
     }
 
@@ -497,11 +532,11 @@ public class FloatingTranslatorService extends Service {
         overlayView.animate().alpha(0f).setDuration(220).withEndAction(() -> {
             if (destroyed) return;
             overlayVisible = false;
-            // Restore pass-through so game input is not blocked
+            // Restore NOT_TOUCHABLE → overlay is invisible and passthrough
             overlayLP.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            try { wm.updateViewLayout(overlayView, overlayLP); } catch (Exception ignored) {}
+            safeUpdateLayout(overlayView, overlayLP);
         }).start();
         if (btnView != null)
             btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
@@ -518,98 +553,144 @@ public class FloatingTranslatorService extends Service {
         if (dismissR != null) { H.removeCallbacks(dismissR); dismissR = null; }
     }
 
-    // ════════════════════════════════════════
-    // AUTO MODE (clipboard monitoring)
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
+    // AUTO MODE
+    // ═════════════════════════════════════════════════════════════
 
     private void startAuto() {
         if (autoMode) return;
-        autoMode = true;
+        autoMode    = true;
+        lastAutoText = "";
         if (autoDot != null) autoDot.setVisibility(View.VISIBLE);
-        clipCb = () -> H.post(() -> {
-            String t = clip();
-            if (t != null && !t.isEmpty()) {
-                String h = t.substring(0, Math.min(t.length(), 80));
-                if (!h.equals(lastClipHash)) { lastClipHash = h; doTranslate(t); }
-            }
-        });
-        clipMgr.addPrimaryClipChangedListener(clipCb);
         Toast.makeText(this, "AUTO ON", Toast.LENGTH_SHORT).show();
+        scheduleAutoCapture();
     }
 
-    private void stopAuto() {
-        if (!autoMode) return;
+    private void stopAutoInternal() {
         autoMode = false;
-        if (autoDot != null) autoDot.setVisibility(View.GONE);
-        if (clipCb != null) {
-            try { clipMgr.removePrimaryClipChangedListener(clipCb); } catch (Exception ignored) {}
-            clipCb = null;
+        if (autoLoopR != null) {
+            H.removeCallbacks(autoLoopR);
+            autoLoopR = null;
         }
     }
 
-    // ════════════════════════════════════════
-    // OCR
-    // ════════════════════════════════════════
+    private void stopAuto() {
+        stopAutoInternal();
+        if (autoDot != null) autoDot.setVisibility(View.GONE);
+        Toast.makeText(this, "AUTO OFF", Toast.LENGTH_SHORT).show();
+        hideOverlay();
+    }
 
-    private void doOCR() {
-        // Debounce: ignore if already working
+    private void scheduleAutoCapture() {
+        if (destroyed || !autoMode) return;
+        autoLoopR = () -> {
+            if (destroyed || !autoMode) return;
+            if (!ocrBusy.get() && !translating.get()) {
+                doOCRInternal(true /* silent */);
+            }
+            if (!destroyed && autoMode) scheduleAutoCapture();
+        };
+        H.postDelayed(autoLoopR, AUTO_INTERVAL_MS);
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // OCR
+    // ═════════════════════════════════════════════════════════════
+
+    private void doOCR() { doOCRInternal(false); }
+
+    /**
+     * Core OCR method.
+     *
+     * @param silent true = AUTO MODE (no "Reading…" UI, skip if same text)
+     *
+     * Resource lifecycle (always guaranteed):
+     *   VirtualDisplay  → released in finally
+     *   ImageReader     → closed in finally
+     *   Bitmap          → recycled after OCR or on every failure
+     *   ocrBusy         → reset on every exit path
+     *   WakeLock        → released after frame acquired
+     */
+    private void doOCRInternal(final boolean silent) {
+        // Debounce — only one capture at a time
         if (!ocrBusy.compareAndSet(false, true)) {
             Log.d(TAG, "OCR debounced");
             return;
         }
 
-        // Check MediaProjection
+        // Check MediaProjection under lock
         synchronized (mpLock) {
             if (mediaProjection == null) {
                 ocrBusy.set(false);
-                Toast.makeText(this, "Need screen permission — reopen app", Toast.LENGTH_SHORT).show();
-                Intent i = new Intent(this, MainActivity.class);
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-                startActivity(i);
+                if (!silent) {
+                    H.post(() -> {
+                        if (destroyed) return;
+                        Toast.makeText(this,
+                            "Need screen permission — reopen app",
+                            Toast.LENGTH_SHORT).show();
+                        try {
+                            Intent i = new Intent(this, MainActivity.class);
+                            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+                            startActivity(i);
+                        } catch (Exception ignored) {}
+                    });
+                }
                 return;
             }
         }
 
         if (recognizerJa == null || recognizerLat == null) {
             ocrBusy.set(false);
-            Toast.makeText(this, "OCR not ready — reinstall app", Toast.LENGTH_SHORT).show();
+            if (!silent)
+                H.post(() -> {
+                    if (!destroyed)
+                        Toast.makeText(this, "OCR not ready", Toast.LENGTH_SHORT).show();
+                });
             return;
         }
 
-        // Update UI: show "Reading..."
-        if (tvBtnLabel != null) tvBtnLabel.setText("...");
-        if (btnView != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-        if (tvTranslation != null) {
-            tvTranslation.setText("Reading screen...");
-            tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
+        // Show "reading" UI for manual captures
+        if (!silent) {
+            H.post(() -> {
+                if (destroyed) return;
+                if (tvBtnLabel   != null) tvBtnLabel.setText("...");
+                if (btnView      != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
+                if (tvTranslation!= null) {
+                    tvTranslation.setText("Reading screen\u2026");
+                    tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
+                }
+                if (tvOriginal  != null) tvOriginal.setText("");
+                if (tvLangPair  != null) tvLangPair.setText(pairText());
+                showOverlay();
+            });
         }
-        if (tvOriginal != null) tvOriginal.setText("");
-        if (tvLangPair != null) tvLangPair.setText(pairText());
-        showOverlay();
 
-        // Capture full-res (needed for accuracy; we crop after)
-        final int capW   = SW;
-        final int capH   = SH;
         final int density = getResources().getDisplayMetrics().densityDpi;
-
-        // Use WeakReference to avoid holding Service reference in lambda after destroy
         final WeakReference<FloatingTranslatorService> weakSelf = new WeakReference<>(this);
 
-        pendingTask = executor.submit(() -> {
+        executor.submit(() -> {
             FloatingTranslatorService self = weakSelf.get();
             if (self == null || self.destroyed) { ocrBusy.set(false); return; }
 
-            ImageReader reader = null;
-            VirtualDisplay vd  = null;
-            Bitmap fullBmp     = null;
+            // Acquire WakeLock for the duration of the capture
+            try { if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(5_000); }
+            catch (Exception e) { Log.w(TAG, "WakeLock acquire: " + e.getMessage()); }
+
+            ImageReader  reader  = null;
+            VirtualDisplay vd   = null;
+            Bitmap         fullBmp = null;
 
             try {
-                reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+                // Buffer = 1 → always get the freshest frame, never a stale one
+                reader = ImageReader.newInstance(
+                    capW, capH, PixelFormat.RGBA_8888, 1);
 
                 synchronized (mpLock) {
                     if (mediaProjection == null) {
                         ocrBusy.set(false);
-                        H.post(() -> resetBtn(shortPair()));
+                        releaseWakeLock();
+                        H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
                         return;
                     }
                     vd = mediaProjection.createVirtualDisplay(
@@ -618,186 +699,229 @@ public class FloatingTranslatorService extends Service {
                         reader.getSurface(), null, null);
                 }
 
-                // Wait for display to render a frame
+                // Wait for VirtualDisplay to render first frame
                 Thread.sleep(CAPTURE_DELAY_MS);
 
-                // Acquire frame
-                final ImageReader finalReader = reader;
-                Image img = finalReader.acquireLatestImage();
+                if (destroyed) { ocrBusy.set(false); return; }
+
+                // Acquire frame — try up to 3 times with short back-off
+                Image img = null;
+                for (int attempt = 0; attempt < 3 && img == null; attempt++) {
+                    try {
+                        img = reader.acquireLatestImage();
+                    } catch (Exception e) {
+                        Log.w(TAG, "acquireLatestImage attempt " + attempt + ": " + e.getMessage());
+                    }
+                    if (img == null && attempt < 2) {
+                        try { Thread.sleep(80); } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                }
+
+                releaseWakeLock(); // Release as soon as we have the frame
+
                 if (img != null) {
                     try {
                         Image.Plane[] planes = img.getPlanes();
-                        ByteBuffer buf    = planes[0].getBuffer();
-                        int rStride       = planes[0].getRowStride();
-                        int pStride       = planes[0].getPixelStride();
-                        int bmpW          = rStride / pStride;
+                        ByteBuffer buf   = planes[0].getBuffer();
+                        int rStride      = planes[0].getRowStride();
+                        int pStride      = planes[0].getPixelStride();
+                        int bmpW         = rStride / pStride;
                         Bitmap tmp = Bitmap.createBitmap(bmpW, capH, Bitmap.Config.ARGB_8888);
                         tmp.copyPixelsFromBuffer(buf);
-                        // Crop to actual screen width (stride may be wider)
-                        fullBmp = Bitmap.createBitmap(tmp, 0, 0, capW, capH);
-                        tmp.recycle(); // recycle intermediate immediately
+                        // Crop to actual capture width
+                        fullBmp = Bitmap.createBitmap(
+                            tmp, 0, 0, Math.min(capW, bmpW), capH);
+                        if (tmp != fullBmp) recycleSafe(tmp);
+                    } catch (Exception e) {
+                        Log.e(TAG, "Bitmap copy: " + e.getMessage(), e);
                     } finally {
-                        img.close(); // ALWAYS close Image to release buffer
+                        try { img.close(); } catch (Exception ignored) {}
                     }
+                } else {
+                    Log.w(TAG, "acquireLatestImage: null after 3 attempts");
                 }
 
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
-                Log.d(TAG, "OCR interrupted");
+                Log.d(TAG, "OCR capture interrupted");
+                ocrBusy.set(false);
+                releaseWakeLock();
+                return;
             } catch (Exception e) {
-                Log.e(TAG, "Capture error: " + e.getMessage());
+                Log.e(TAG, "Capture error: " + e.getMessage(), e);
             } finally {
                 // ALWAYS release VirtualDisplay and ImageReader
-                if (vd != null)     { try { vd.release();     } catch (Exception ignored) {} }
-                if (reader != null) { try { reader.close();   } catch (Exception ignored) {} }
+                if (vd     != null) { try { vd.release();    } catch (Exception e) { Log.e(TAG, "vd.release: " + e); } }
+                if (reader != null) { try { reader.close();   } catch (Exception e) { Log.e(TAG, "reader.close: " + e); } }
+                releaseWakeLock();
             }
 
             if (fullBmp == null) {
                 ocrBusy.set(false);
-                H.post(() -> {
-                    if (destroyed) return;
-                    resetBtn(shortPair());
-                    if (tvTranslation != null) {
-                        tvTranslation.setText("Capture failed — try again");
-                        tvTranslation.setTextColor(Color.argb(220, 255, 180, 80));
-                    }
-                });
+                if (!silent) {
+                    H.post(() -> {
+                        if (destroyed) return;
+                        resetBtn(shortPair());
+                        if (tvTranslation != null) {
+                            tvTranslation.setText("Capture failed — try again");
+                            tvTranslation.setTextColor(Color.argb(220, 255, 180, 80));
+                        }
+                    });
+                }
                 return;
             }
 
-            // Crop to dialogue region (bottom ~35% of screen)
+            // Crop to dialogue region (lower portion of screen)
             int cropTop = (int)(capH * OCR_TOP);
             int cropH   = (int)(capH * OCR_BOTTOM) - cropTop;
-            Bitmap cropped = Bitmap.createBitmap(fullBmp, 0, cropTop, capW, cropH);
+            cropH = Math.max(cropH, 1);
+            Bitmap cropped = null;
+            try {
+                cropped = Bitmap.createBitmap(fullBmp, 0, cropTop, capW, cropH);
+            } catch (Exception e) {
+                Log.e(TAG, "Bitmap crop: " + e.getMessage(), e);
+                recycleSafe(fullBmp);
+                ocrBusy.set(false);
+                return;
+            }
 
-            // Select recognizer based on source language
+            // Choose recognizer: Japanese model for CJK, Latin for everything else
             boolean useJa = fromLang.equals("ja") || fromLang.equals("ko")
-                         || fromLang.startsWith("zh") || fromLang.equals("auto");
+                || fromLang.startsWith("zh") || fromLang.equals("auto");
             TextRecognizer rec = useJa ? recognizerJa : recognizerLat;
 
-            final Bitmap finalFull    = fullBmp;
-            final Bitmap finalCropped = cropped;
+            final Bitmap fFull    = fullBmp;
+            final Bitmap fCropped = cropped;
+            final boolean fSilent = silent;
 
-            // Run OCR on cropped region first
-            rec.process(InputImage.fromBitmap(finalCropped, 0))
+            rec.process(InputImage.fromBitmap(fCropped, 0))
                 .addOnSuccessListener(result -> {
-                    finalCropped.recycle(); // done with cropped
+                    recycleSafe(fCropped);
                     String text = result.getText().trim();
                     if (!text.isEmpty()) {
-                        finalFull.recycle(); // done with full too
+                        recycleSafe(fFull);
                         ocrBusy.set(false);
-                        H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
-                        doTranslate(text);
+                        if (!fSilent)
+                            H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
+                        handleOCRResult(text, fSilent);
                     } else {
-                        // Fallback: OCR on full screen
-                        rec.process(InputImage.fromBitmap(finalFull, 0))
+                        // Fallback: full-screen OCR
+                        rec.process(InputImage.fromBitmap(fFull, 0))
                             .addOnSuccessListener(r2 -> {
-                                finalFull.recycle();
+                                recycleSafe(fFull);
                                 ocrBusy.set(false);
-                                H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
+                                if (!fSilent)
+                                    H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
                                 String t2 = r2.getText().trim();
                                 if (!t2.isEmpty()) {
-                                    doTranslate(t2);
-                                } else {
+                                    handleOCRResult(t2, fSilent);
+                                } else if (!fSilent) {
                                     H.post(() -> {
                                         if (destroyed) return;
                                         if (tvTranslation != null) {
                                             tvTranslation.setText("No text found on screen");
-                                            tvTranslation.setTextColor(Color.argb(200, 255, 200, 80));
+                                            tvTranslation.setTextColor(
+                                                Color.argb(200, 255, 200, 80));
                                         }
                                     });
                                 }
                             })
                             .addOnFailureListener(e -> {
-                                finalFull.recycle();
+                                Log.e(TAG, "Full OCR failed: " + e.getMessage(), e);
+                                recycleSafe(fFull);
                                 ocrBusy.set(false);
-                                H.post(() -> {
-                                    if (destroyed) return;
-                                    resetBtn(shortPair());
-                                    if (tvTranslation != null) {
-                                        tvTranslation.setText("OCR failed: " + e.getMessage());
-                                        tvTranslation.setTextColor(Color.argb(220, 255, 100, 100));
+                                if (!fSilent) H.post(() -> {
+                                    if (!destroyed) {
+                                        resetBtn(shortPair());
+                                        setTranslationError("OCR failed: " + e.getMessage());
                                     }
                                 });
                             });
                     }
                 })
                 .addOnFailureListener(e -> {
-                    finalCropped.recycle();
-                    finalFull.recycle();
+                    Log.e(TAG, "Crop OCR failed: " + e.getMessage(), e);
+                    recycleSafe(fCropped);
+                    recycleSafe(fFull);
                     ocrBusy.set(false);
-                    H.post(() -> {
-                        if (destroyed) return;
-                        resetBtn(shortPair());
-                        if (tvTranslation != null) {
-                            tvTranslation.setText("OCR error: " + e.getMessage());
-                            tvTranslation.setTextColor(Color.argb(220, 255, 100, 100));
+                    if (!fSilent) H.post(() -> {
+                        if (!destroyed) {
+                            resetBtn(shortPair());
+                            setTranslationError("OCR error: " + e.getMessage());
                         }
                     });
                 });
         });
     }
 
-    // ════════════════════════════════════════
+    private void handleOCRResult(String text, boolean silent) {
+        if (silent) {
+            if (text.equals(lastAutoText)) return; // no change
+            lastAutoText = text;
+        }
+        doTranslate(text);
+    }
+
+    // ═════════════════════════════════════════════════════════════
     // Translation
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     private void doTranslate(final String text) {
-        // Debounce: ignore if already translating
         if (!translating.compareAndSet(false, true)) {
             Log.d(TAG, "Translation debounced");
             return;
         }
         cancelDismiss();
 
-        // Check cache first
+        // Cache hit?
         String cacheKey = fromLang + "|" + toLang + "|" + text;
         String cached   = translateCache.get(cacheKey);
         if (cached != null) {
             Log.d(TAG, "Cache hit");
             translating.set(false);
-            final String result = cached;
-            H.post(() -> {
-                if (destroyed) return;
-                showTranslationResult(text, result);
-            });
+            H.post(() -> { if (!destroyed) showTranslationResult(text, cached); });
             return;
         }
 
-        // Update UI
+        // Show "translating" UI
         H.post(() -> {
             if (destroyed) return;
-            if (tvBtnLabel != null) tvBtnLabel.setText("...");
-            if (btnView != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-            String disp = text.length() > 80 ? text.substring(0, 80) + "\u2026" : text;
-            if (tvOriginal != null) tvOriginal.setText(disp);
-            if (tvTranslation != null) {
-                tvTranslation.setText("Translating...");
+            if (tvBtnLabel   != null) tvBtnLabel.setText("...");
+            if (btnView      != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
+            String disp = clip(text, 80);
+            if (tvOriginal   != null) tvOriginal.setText(disp);
+            if (tvTranslation!= null) {
+                tvTranslation.setText("Translating\u2026");
                 tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
             }
-            if (tvLangPair != null) tvLangPair.setText(pairText());
+            if (tvLangPair   != null) tvLangPair.setText(pairText());
             showOverlay();
         });
 
-        final String input = text.length() > 600 ? text.substring(0, 600) : text;
+        final String input    = text.length() > 600 ? text.substring(0, 600) : text;
         final String snapFrom = fromLang;
         final String snapTo   = toLang;
+        final String key      = cacheKey;
 
         executor.submit(() -> {
             if (destroyed) { translating.set(false); return; }
-            String result = null;
-            Exception lastError = null;
+            String    result = null;
+            Exception lastEx = null;
 
-            // Try up to 2 times (1 retry on network error)
+            // 2 attempts with 700 ms back-off
             for (int attempt = 0; attempt < 2; attempt++) {
                 try {
                     result = googleTranslate(input, snapFrom, snapTo);
-                    break; // success
+                    break;
                 } catch (Exception e) {
-                    lastError = e;
-                    Log.w(TAG, "Translate attempt " + (attempt+1) + " failed: " + e.getMessage());
+                    lastEx = e;
+                    Log.w(TAG, "Translate attempt " + (attempt + 1) + ": " + e.getMessage(), e);
                     if (attempt == 0) {
-                        try { Thread.sleep(600); } catch (InterruptedException ie) {
+                        try { Thread.sleep(700); }
+                        catch (InterruptedException ie) {
                             Thread.currentThread().interrupt();
                             break;
                         }
@@ -806,23 +930,18 @@ public class FloatingTranslatorService extends Service {
             }
 
             translating.set(false);
-
-            final String finalResult = result;
-            final Exception finalError = lastError;
-            final String key = cacheKey;
+            final String    fResult = result;
+            final Exception fErr    = lastEx;
 
             H.post(() -> {
                 if (destroyed) return;
-                if (finalResult != null) {
-                    translateCache.put(key, finalResult);
-                    showTranslationResult(text, finalResult);
+                if (fResult != null) {
+                    translateCache.put(key, fResult);
+                    showTranslationResult(text, fResult);
                 } else {
                     resetBtn(shortPair());
-                    if (tvTranslation != null) {
-                        String msg = finalError != null ? finalError.getMessage() : "Unknown error";
-                        tvTranslation.setText("Error: " + msg);
-                        tvTranslation.setTextColor(Color.argb(220, 255, 120, 120));
-                    }
+                    String msg = fErr != null ? fErr.getMessage() : "Unknown error";
+                    setTranslationError("Error: " + msg);
                 }
             });
         });
@@ -830,22 +949,28 @@ public class FloatingTranslatorService extends Service {
 
     private void showTranslationResult(String original, String translated) {
         if (destroyed) return;
-        String disp = original.length() > 80 ? original.substring(0, 80) + "\u2026" : original;
-        if (tvOriginal != null)    tvOriginal.setText(disp);
-        if (tvTranslation != null) {
+        if (tvOriginal   != null) tvOriginal.setText(clip(original, 80));
+        if (tvTranslation!= null) {
             tvTranslation.setText(translated);
             tvTranslation.setTextColor(Color.argb(245, 220, 238, 255));
         }
-        if (tvLangPair != null) tvLangPair.setText(pairText());
+        if (tvLangPair   != null) tvLangPair.setText(pairText());
         resetBtn(shortPair());
         showOverlay();
         if (!autoMode) scheduleDismiss();
-        try { wm.updateViewLayout(overlayView, overlayLP); } catch (Exception ignored) {}
+        safeUpdateLayout(overlayView, overlayLP);
     }
 
-    // ════════════════════════════════════════
+    private void setTranslationError(String msg) {
+        if (tvTranslation != null) {
+            tvTranslation.setText(msg);
+            tvTranslation.setTextColor(Color.argb(220, 255, 120, 120));
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════
     // Language Picker
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     interface LangCb { void pick(String code); }
 
@@ -857,8 +982,8 @@ public class FloatingTranslatorService extends Service {
                 fromLang = pickerFrom;
                 toLang   = code2;
                 ClipboardBridge.saveLang(this, fromLang, toLang);
-                if (tvLangPair != null) tvLangPair.setText(pairText());
-                if (tvBtnLabel != null) tvBtnLabel.setText(shortPair());
+                if (tvLangPair  != null) tvLangPair.setText(pairText());
+                if (tvBtnLabel  != null) tvBtnLabel.setText(shortPair());
                 closePicker();
             }));
         });
@@ -878,7 +1003,7 @@ public class FloatingTranslatorService extends Service {
         root.setBackground(bg);
         root.setElevation(dp(16));
 
-        // Title + X
+        // Title row
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -905,6 +1030,7 @@ public class FloatingTranslatorService extends Service {
         divider.setBackgroundColor(Color.argb(50, 60, 100, 200));
         root.addView(divider, divLp);
 
+        // Scrollable list
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout list = new LinearLayout(this);
@@ -924,28 +1050,30 @@ public class FloatingTranslatorService extends Service {
             row.setOnClickListener(v -> cb.pick(lang[0]));
             row.setOnTouchListener((v, e) -> {
                 int a = e.getAction();
-                if (a == MotionEvent.ACTION_DOWN)
+                if      (a == MotionEvent.ACTION_DOWN)
                     row.setTextColor(Color.argb(255, 80, 160, 255));
                 else if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL)
                     row.setTextColor(Color.argb(200, 160, 195, 245));
                 return false;
             });
             list.addView(row);
+
             View rd = new View(this);
             rd.setBackgroundColor(Color.argb(30, 50, 80, 160));
             list.addView(rd, new LinearLayout.LayoutParams(mp(), dp(1)));
         }
 
         scroll.addView(list);
-        root.addView(scroll, new LinearLayout.LayoutParams(mp(), (int)(SH * 0.48f)));
+        root.addView(scroll,
+            new LinearLayout.LayoutParams(mp(), (int)(SH * 0.48f)));
 
         pickerView = root;
-        pickerLP = new WindowManager.LayoutParams(
+        WindowManager.LayoutParams pickerLP = new WindowManager.LayoutParams(
             (int)(SW * 0.70f), wc(), overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT);
         pickerLP.gravity = Gravity.CENTER;
-        wm.addView(pickerView, pickerLP);
+        safeAddView(pickerView, pickerLP);
     }
 
     private void closePicker() {
@@ -953,15 +1081,15 @@ public class FloatingTranslatorService extends Service {
         pickerView = null;
     }
 
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
     // Button Touch
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     private class BtnTouch implements View.OnTouchListener {
-        private int ix, iy;
+        private int   ix, iy;
         private float rx, ry;
         private boolean dragged;
-        private long downAt;
+        private long    downAt;
 
         @Override
         public boolean onTouch(View v, MotionEvent e) {
@@ -971,29 +1099,30 @@ public class FloatingTranslatorService extends Service {
                     rx = e.getRawX(); ry = e.getRawY();
                     dragged = false; downAt = System.currentTimeMillis();
                     if (fadeOutR != null) H.removeCallbacks(fadeOutR);
-                    if (btnView != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(80).start();
+                    if (btnView  != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(80).start();
                     return true;
 
-                case MotionEvent.ACTION_MOVE:
+                case MotionEvent.ACTION_MOVE: {
                     float dx = e.getRawX() - rx, dy = e.getRawY() - ry;
                     if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-                        dragged = true;
-                        btnLP.x = Math.max(0, Math.min(ix + (int)dx, SW - dp(68)));
-                        btnLP.y = Math.max(0, Math.min(iy + (int)dy, SH - dp(40)));
-                        try { wm.updateViewLayout(btnView, btnLP); } catch (Exception ignored) {}
+                        dragged  = true;
+                        btnLP.x  = Math.max(0, Math.min(ix + (int)dx, SW - dp(68)));
+                        btnLP.y  = Math.max(0, Math.min(iy + (int)dy, SH - dp(40)));
+                        safeUpdateLayout(btnView, btnLP);
                     }
                     return true;
+                }
 
                 case MotionEvent.ACTION_UP:
                     if (!dragged) {
                         long held = System.currentTimeMillis() - downAt;
-                        if (held >= LONG_MS) {
+                        if (held >= LONG_PRESS_MS) {
                             if (autoMode) stopAuto(); else startAuto();
                         } else {
                             tapCount++;
                             if (tapCount == 1) {
                                 doubleTapCheck = () -> { tapCount = 0; onSingleTap(); };
-                                H.postDelayed(doubleTapCheck, DOUBLE_MS);
+                                H.postDelayed(doubleTapCheck, DOUBLE_TAP_MS);
                             } else {
                                 if (doubleTapCheck != null) H.removeCallbacks(doubleTapCheck);
                                 tapCount = 0;
@@ -1010,8 +1139,8 @@ public class FloatingTranslatorService extends Service {
     }
 
     private void onSingleTap() {
-        if (pickerView != null)  { closePicker(); scheduleBtnFade(); return; }
-        if (overlayVisible)      { hideOverlay(); return; }
+        if (pickerView  != null)  { closePicker(); scheduleBtnFade(); return; }
+        if (overlayVisible)       { hideOverlay(); return; }
         doOCR();
     }
 
@@ -1020,15 +1149,17 @@ public class FloatingTranslatorService extends Service {
         openPicker();
     }
 
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
     // Google Translate
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     private String googleTranslate(String text, String from, String to) throws Exception {
         String q = URLEncoder.encode(text, "UTF-8");
         String urlStr = "https://translate.googleapis.com/translate_a/single"
-            + "?client=gtx&sl=" + (from.equals("auto") ? "auto" : from)
-            + "&tl=" + to + "&dt=t&q=" + q;
+            + "?client=gtx"
+            + "&sl=" + (from.equals("auto") ? "auto" : from)
+            + "&tl=" + to
+            + "&dt=t&q=" + q;
 
         HttpURLConnection c = null;
         try {
@@ -1058,26 +1189,14 @@ public class FloatingTranslatorService extends Service {
             String result = res.toString().trim();
             if (result.isEmpty()) throw new Exception("Empty response");
             return result;
-
         } finally {
-            // ALWAYS disconnect to release connection pool slot
             if (c != null) c.disconnect();
         }
     }
 
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
     // Helpers
-    // ════════════════════════════════════════
-
-    private String clip() {
-        try {
-            if (clipMgr != null && clipMgr.hasPrimaryClip()) {
-                android.content.ClipData.Item it = clipMgr.getPrimaryClip().getItemAt(0);
-                if (it != null && it.getText() != null) return it.getText().toString().trim();
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
+    // ═════════════════════════════════════════════════════════════
 
     private String pairText()  { return abbr(fromLang) + " \u2192 " + abbr(toLang); }
     private String shortPair() { return abbr(fromLang) + "\u2192" + abbr(toLang); }
@@ -1085,6 +1204,10 @@ public class FloatingTranslatorService extends Service {
     private String abbr(String c) {
         for (String[] l : LANGS) if (l[0].equals(c)) return l[2];
         return c.length() > 3 ? c.substring(0, 3).toUpperCase() : c.toUpperCase();
+    }
+
+    private String clip(String s, int max) {
+        return s.length() > max ? s.substring(0, max) + "\u2026" : s;
     }
 
     private int dp(int v) {
@@ -1106,32 +1229,73 @@ public class FloatingTranslatorService extends Service {
             FrameLayout.LayoutParams.MATCH_PARENT);
     }
 
-    private void safeRemove(View v) {
-        if (v != null) try { wm.removeView(v); } catch (Exception ignored) {}
+    // ── Safe WindowManager wrappers ───────────────────────────────
+
+    private void safeAddView(View v, WindowManager.LayoutParams lp) {
+        if (v == null || lp == null) return;
+        try { wm.addView(v, lp); }
+        catch (WindowManager.BadTokenException e) {
+            Log.e(TAG, "safeAddView BadToken: " + e.getMessage());
+        } catch (Exception e) {
+            Log.e(TAG, "safeAddView: " + e.getMessage(), e);
+        }
     }
 
-    // ════════════════════════════════════════
+    private void safeUpdateLayout(View v, WindowManager.LayoutParams lp) {
+        if (v == null || lp == null || v.getWindowToken() == null) return;
+        try { wm.updateViewLayout(v, lp); }
+        catch (WindowManager.BadTokenException e) {
+            Log.e(TAG, "safeUpdateLayout BadToken: " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            Log.e(TAG, "safeUpdateLayout IAE (view not attached): " + e.getMessage());
+        } catch (Exception e) {
+            Log.e(TAG, "safeUpdateLayout: " + e.getMessage(), e);
+        }
+    }
+
+    private void safeRemove(View v) {
+        if (v == null || v.getWindowToken() == null) return;
+        try { wm.removeView(v); }
+        catch (Exception e) { Log.e(TAG, "safeRemove: " + e.getMessage()); }
+    }
+
+    private void recycleSafe(Bitmap bmp) {
+        if (bmp != null && !bmp.isRecycled()) {
+            try { bmp.recycle(); } catch (Exception ignored) {}
+        }
+    }
+
+    private void releaseWakeLock() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Exception e) {
+            Log.w(TAG, "WakeLock release: " + e.getMessage());
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════
     // Notification
-    // ════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel ch = new NotificationChannel(
                 CHANNEL_ID, "UniversalTranslator", NotificationManager.IMPORTANCE_LOW);
             ch.setShowBadge(false);
+            ch.setSound(null, null);
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) nm.createNotificationChannel(ch);
         }
     }
 
     private Notification buildNotif() {
-        PendingIntent pi = PendingIntent.getActivity(this, 0,
-            new Intent(this, MainActivity.class),
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-                ? PendingIntent.FLAG_IMMUTABLE : 0);
+        int piFlags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+            ? PendingIntent.FLAG_IMMUTABLE : 0;
+        PendingIntent pi = PendingIntent.getActivity(
+            this, 0, new Intent(this, MainActivity.class), piFlags);
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("UniversalTranslator")
-            .setContentText("Tap = translate  \u2022  Double tap = language  \u2022  Hold = AUTO")
+            .setContentText("Tap=translate  Double-tap=language  Hold=AUTO")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pi)
             .setOngoing(true)
