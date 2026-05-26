@@ -205,7 +205,7 @@ public class MainActivity extends AppCompatActivity {
         btnStart.setTextSize(15f);
         btnStart.setPadding(dp(36), dp(14), dp(36), dp(14));
         styleBtn(btnStart);
-        btnStart.setOnClickListener(v -> onStart());
+        btnStart.setOnClickListener(v -> startTranslator());
 
         LinearLayout bw = new LinearLayout(this);
         bw.setGravity(Gravity.CENTER);
@@ -334,7 +334,7 @@ public class MainActivity extends AppCompatActivity {
     // Start Logic
     // ═════════════════════════════════════════════════════════════
 
-    private void onStart() {
+    private void startTranslator() {
         enable(false);
         if (prefs.getBoolean(KEY_GRANTED, false)) {
             status(str("restarting"));
