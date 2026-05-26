@@ -1222,7 +1222,7 @@ public class FloatingTranslatorService extends Service {
 
     private void safeRemove(View v) {
         if (v == null || v.getWindowToken() == null) return;
-        try { wm.removeViewImmediate(v); }
+        try { wm.removeView(v); }
         catch (Exception e) { Log.e(TAG, "removeView: " + e.getMessage()); }
     }
 
