@@ -2,17 +2,24 @@ package com.gametranslator;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.provider.Settings;
 import android.util.Log;
-import android.widget.Toast;
+import android.view.Gravity;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
-import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
@@ -21,31 +28,24 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 /**
- * MainActivity — v12 (Final Stable)
- *
- * Flow:
- *   1. POST_NOTIFICATIONS (Android 13+)
- *   2. SYSTEM_ALERT_WINDOW (Overlay permission)
- *   3. MediaProjection (screen capture)
- *   4. startForegroundService()
- *   5. finish() immediately — no black screen ever
- *
- * Key fixes vs v11:
- * - Service already running? Skip re-launch, just finish().
- * - All result paths call finish() — no path leaves Activity visible.
- * - No heavy work in onCreate() — Activity stays <5ms on screen.
- * - Theme is @style/Theme.Translucent so there's no white/black flash.
- * - onNewIntent() just finishes (singleTop — prevents stacking).
+ * MainActivity — v14
+ * - يطلب الصلاحيات مرة واحدة فقط في العمر
+ * - إذا الخدمة شغالة → يغلق مباشرة بدون أي طلب
+ * - إذا الخدمة ماتت → زر لإعادة التشغيل فقط بدون طلب صلاحيات جديدة
  */
 public class MainActivity extends AppCompatActivity {
 
-    private static final String TAG       = "GT_Main";
-    private static final int    REQ_NOTIF = 1001;
+    private static final String TAG        = "GT_Main";
+    private static final String PREFS      = "ut_prefs";
+    private static final String KEY_GRANTED = "screen_granted";
+    private static final int    REQ_NOTIF  = 1001;
 
     private MediaProjectionManager mpManager;
-    private boolean                alreadyLaunched = false;
+    private Button                 btnStart;
+    private TextView               tvStatus;
+    private SharedPreferences      prefs;
 
-    // ── Overlay permission launcher ──────────────────────────────
+    // ── Overlay permission ───────────────────────────────────────
     private final ActivityResultLauncher<Intent> overlayLauncher =
         registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
@@ -54,14 +54,12 @@ public class MainActivity extends AppCompatActivity {
                         && Settings.canDrawOverlays(this)) {
                     requestScreenCapture();
                 } else {
-                    Toast.makeText(this,
-                        "Overlay permission required for floating button",
-                        Toast.LENGTH_LONG).show();
-                    launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+                    setStatus("❌ صلاحية الـ Overlay مرفوضة");
+                    if (btnStart != null) btnStart.setEnabled(true);
                 }
             });
 
-    // ── MediaProjection permission launcher ──────────────────────
+    // ── MediaProjection permission ───────────────────────────────
     private final ActivityResultLauncher<Intent> screenCapLauncher =
         registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
@@ -69,14 +67,12 @@ public class MainActivity extends AppCompatActivity {
                 int    rc   = result.getResultCode();
                 Intent data = result.getData();
                 if (rc == Activity.RESULT_OK && data != null) {
-                    Log.d(TAG, "Screen capture GRANTED");
-                    launchServiceAndFinish(rc, data);
+                    // احفظ أن المستخدم وافق — ما نسأله مجدداً
+                    prefs.edit().putBoolean(KEY_GRANTED, true).apply();
+                    launchService(rc, data);
                 } else {
-                    Log.w(TAG, "Screen capture DENIED");
-                    Toast.makeText(this,
-                        "Screen capture denied — OCR unavailable. Re-open to grant.",
-                        Toast.LENGTH_LONG).show();
-                    launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+                    setStatus("❌ صلاحية الشاشة مرفوضة — اضغط مجدداً");
+                    if (btnStart != null) btnStart.setEnabled(true);
                 }
             });
 
@@ -85,34 +81,95 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // Minimal transparent layout — user never sees this
-        setContentView(R.layout.activity_main);
 
-        // Prevent double-launch on config change / re-create
-        if (alreadyLaunched) { finish(); return; }
-        alreadyLaunched = true;
-
+        prefs     = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        if (mpManager == null) {
-            Log.e(TAG, "MediaProjectionManager null — OCR unavailable");
-            Toast.makeText(this,
-                "Device does not support screen capture",
-                Toast.LENGTH_LONG).show();
-            launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+
+        // ── إذا الخدمة شغالة → أغلق فوراً بدون أي شيء ──────────
+        if (isServiceRunning()) {
+            finish();
             return;
         }
 
-        // Step 1 — notification permission (Android 13+)
+        // ── بناء الواجهة ─────────────────────────────────────────
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF020710);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(32), dp(32), dp(32), dp(32));
+
+        TextView tvTitle = new TextView(this);
+        tvTitle.setText("مترجم الألعاب");
+        tvTitle.setTextColor(0xFF3D8BFF);
+        tvTitle.setTextSize(24f);
+        tvTitle.setGravity(Gravity.CENTER);
+        tvTitle.setPadding(0, 0, 0, dp(8));
+        card.addView(tvTitle);
+
+        TextView tvDesc = new TextView(this);
+        tvDesc.setTextColor(0xFF8899BB);
+        tvDesc.setTextSize(13f);
+        tvDesc.setGravity(Gravity.CENTER);
+        tvDesc.setPadding(0, 0, 0, dp(28));
+        card.addView(tvDesc);
+
+        btnStart = new Button(this);
+        btnStart.setTextColor(0xFFFFFFFF);
+        btnStart.setBackgroundColor(0xFF3D8BFF);
+        btnStart.setTextSize(16f);
+        btnStart.setPadding(dp(32), dp(14), dp(32), dp(14));
+        btnStart.setOnClickListener(v -> onStartPressed());
+        card.addView(btnStart);
+
+        tvStatus = new TextView(this);
+        tvStatus.setTextColor(0xFF00E676);
+        tvStatus.setTextSize(12f);
+        tvStatus.setGravity(Gravity.CENTER);
+        tvStatus.setPadding(0, dp(16), 0, 0);
+        card.addView(tvStatus);
+
+        root.addView(card, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT));
+        setContentView(root);
+
+        // ── تحديد نص الزر حسب الحالة ─────────────────────────────
+        if (prefs.getBoolean(KEY_GRANTED, false)) {
+            // سبق ووافق — الزر لإعادة التشغيل فقط بدون طلب صلاحيات
+            tvDesc.setText("المترجم متوقف\nاضغط لإعادة التشغيل");
+            btnStart.setText("▶  إعادة التشغيل");
+        } else {
+            // أول مرة
+            tvDesc.setText("اضغط لتشغيل المترجم العائم\nستُطلب الصلاحية مرة واحدة فقط");
+            btnStart.setText("▶  تشغيل المترجم");
+        }
+    }
+
+    private void onStartPressed() {
+        if (btnStart != null) btnStart.setEnabled(false);
+
+        // إذا سبق وأعطى الصلاحية → أعد التشغيل مباشرة بدون طلب
+        if (prefs.getBoolean(KEY_GRANTED, false)) {
+            setStatus("جاري إعادة التشغيل…");
+            // نفتح MainActivity من الخدمة لطلب MediaProjection جديد
+            checkOverlayThenCapture();
+            return;
+        }
+
+        // أول مرة — تحقق من الصلاحيات
+        setStatus("جاري التحقق من الصلاحيات…");
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    REQ_NOTIF);
-                return; // continues in onRequestPermissionsResult
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+                return;
             }
         }
-        checkOverlay();
+        checkOverlayThenCapture();
     }
 
     @Override
@@ -120,17 +177,13 @@ public class MainActivity extends AppCompatActivity {
                                            @NonNull String[] permissions,
                                            @NonNull int[] results) {
         super.onRequestPermissionsResult(req, permissions, results);
-        // Always continue regardless of result — notification is optional
-        if (req == REQ_NOTIF) checkOverlay();
+        if (req == REQ_NOTIF) checkOverlayThenCapture();
     }
 
-    /** Step 2 — overlay permission */
-    private void checkOverlay() {
+    private void checkOverlayThenCapture() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
                 && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this,
-                "Allow 'Display over other apps' for floating button",
-                Toast.LENGTH_LONG).show();
+            setStatus("اسمح بـ 'العرض فوق التطبيقات' ثم ارجع");
             overlayLauncher.launch(new Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:" + getPackageName())));
@@ -139,59 +192,57 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** Step 3 — screen capture permission */
     private void requestScreenCapture() {
+        setStatus("اسمح بتصوير الشاشة…");
         try {
             screenCapLauncher.launch(mpManager.createScreenCaptureIntent());
         } catch (Exception e) {
-            Log.e(TAG, "createScreenCaptureIntent failed: " + e.getMessage(), e);
-            Toast.makeText(this, "Cannot request screen permission", Toast.LENGTH_LONG).show();
-            launchServiceAndFinish(Activity.RESULT_CANCELED, null);
+            Log.e(TAG, "createScreenCaptureIntent: " + e.getMessage(), e);
+            setStatus("❌ خطأ: " + e.getMessage());
+            if (btnStart != null) btnStart.setEnabled(true);
         }
     }
 
-    /**
-     * Step 4+5: Start service → finish Activity immediately.
-     * This is the ONLY exit point — every code path calls this method.
-     */
-    private void launchServiceAndFinish(int resultCode, Intent data) {
+    private void launchService(int resultCode, Intent data) {
         Intent svc = new Intent(this, FloatingTranslatorService.class);
         if (resultCode == Activity.RESULT_OK && data != null) {
             svc.putExtra("mp_result_code", resultCode);
             svc.putExtra("mp_data", data);
         }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 startForegroundService(svc);
-            } else {
+            else
                 startService(svc);
-            }
-            Log.d(TAG, "Service started (resultCode=" + resultCode + ")");
+
+            setStatus("✅ تم التشغيل!");
+            // أغلق بعد ثانية
+            new Handler().postDelayed(this::finish, 1000);
         } catch (Exception e) {
-            Log.e(TAG, "startForegroundService failed: " + e.getMessage(), e);
-            Toast.makeText(this,
-                "Could not start translator: " + e.getMessage(),
-                Toast.LENGTH_LONG).show();
+            Log.e(TAG, "start service: " + e.getMessage(), e);
+            setStatus("❌ فشل: " + e.getMessage());
+            if (btnStart != null) btnStart.setEnabled(true);
         }
-        // Always close — never leave user staring at a black screen
-        finish();
     }
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        // singleTop re-launch — just close
-        finish();
+    private boolean isServiceRunning() {
+        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+        if (am == null) return false;
+        for (ActivityManager.RunningServiceInfo s : am.getRunningServices(Integer.MAX_VALUE)) {
+            if (FloatingTranslatorService.class.getName().equals(s.service.getClassName()))
+                return true;
+        }
+        return false;
     }
 
-    @Override
-    public void onBackPressed() {
-        finish();
+    private void setStatus(String msg) {
+        if (tvStatus != null) tvStatus.setText(msg);
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        // Do NOT stop the foreground service here
+    private int dp(int v) {
+        return Math.round(v * getResources().getDisplayMetrics().density);
     }
+
+    @Override public void onBackPressed() { finish(); }
+    @Override protected void onDestroy() { super.onDestroy(); }
 }
