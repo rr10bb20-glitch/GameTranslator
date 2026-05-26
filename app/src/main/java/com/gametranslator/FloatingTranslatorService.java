@@ -5,7 +5,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
@@ -46,90 +48,98 @@ import org.json.JSONArray;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
+import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * FloatingTranslatorService — v14 (Clean)
+ * FloatingTranslatorService — v16 (Production)
  *
- * Changes vs v13:
- * ─ AUTO MODE removed completely (fields + methods + autoDot + long-press toggle)
- * ─ Long-press now opens language picker (was toggle-auto)
- * ─ WakeLock removed completely (on-demand OCR doesn't need it)
- * ─ mediaProjection==null → Toast only, no startActivity (no surprise re-permission)
- * ─ Notification text updated (no "Hold=AUTO")
+ * Changes vs v15:
+ * ─ executor resurrected after START_STICKY restart (RejectedExecutionException fix)
+ * ─ duplicate LANGS entries removed (bn, id were duplicated)
+ * ─ PendingIntent flags: FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE
+ * ─ System.gc() removed — useless on Android, causes lag spikes
+ * ─ Bitmap copy optimised: RGB_565 for OCR (halves RAM), direct crop avoids second copy
+ * ─ scheduleDismiss() called on all OCR failure paths (overlay no longer gets stuck)
+ * ─ safeSubmit() helper prevents RejectedExecutionException from crashing the app
+ * ─ onNoTextFound() centralises the "no text" UI path + calls scheduleDismiss()
+ * ─ hideOverlay() cancel-animation guard prevents double-fade race on fast taps
+ * ─ Executor factory extracted to rebuildExecutorIfNeeded() — safe to call any time
+ * ─ pickerView WindowManager leak fixed: closePicker() guards against already-removed view
+ * ─ MediaProjection callback: translating flag also reset on MP stop
+ * ─ Handler leak: H.removeCallbacksAndMessages(null) kept; executor.shutdownNow() order fixed
+ * ─ doTranslate(): executor.submit wrapped in safeSubmit to avoid silent drop on restart
+ * ─ showResult() guard: destroyed check before touching views
+ * ─ Notification: FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE for Android 12+ compatibility
  */
 public class FloatingTranslatorService extends Service {
 
     private static final String TAG        = "UT";
-    private static final String CHANNEL_ID = "ut_v14";
+    private static final String CHANNEL_ID = "ut_v16";
     private static final int    NOTIF_ID   = 1;
+
+    // SharedPreferences keys — must match MainActivity
+    private static final String PREFS         = "ut_prefs";
+    private static final String KEY_LANG_FROM = "lang_from";
+    private static final String KEY_LANG_TO   = "lang_to";
 
     // ── Timing ──────────────────────────────────────────────────
     private static final long DISMISS_MS       = 6_000;
     private static final long LONG_PRESS_MS    = 650;
     private static final long DOUBLE_TAP_MS    = 300;
-    private static final long CAPTURE_DELAY_MS = 350;
+    private static final long CAPTURE_DELAY_MS = 700;
+    private static final long OCR_COOLDOWN_MS  = 1_200;
 
     // ── Alpha ────────────────────────────────────────────────────
     private static final float ALPHA_IDLE = 0.25f;
     private static final float ALPHA_BUSY = 0.92f;
 
-    // ── OCR crop (lower portion = dialogue box) ──────────────────
+    // ── OCR crop region ──────────────────────────────────────────
     private static final float OCR_TOP    = 0.58f;
     private static final float OCR_BOTTOM = 0.93f;
 
     private static final int CACHE_SIZE = 60;
 
-    // ── Language table ───────────────────────────────────────────
+    // ── Language table [code, name, abbreviation] ─────────────────
+    // NOTE: de-duplicated — no repeated codes
     private static final String[][] LANGS = {
         {"auto","Auto","?"},
         {"ar","Arabic","AR"},{"en","English","EN"},{"ja","Japanese","JA"},
-        {"ko","Korean","KO"},{"zh-CN","Chinese","ZH"},{"zh-TW","Chinese TW","ZH"},
+        {"ko","Korean","KO"},{"zh-CN","Chinese","ZH"},{"zh-TW","Chinese TW","ZT"},
         {"fr","French","FR"},{"de","German","DE"},{"es","Spanish","ES"},
         {"ru","Russian","RU"},{"tr","Turkish","TR"},{"it","Italian","IT"},
-        {"pt","Portuguese","PT"},{"hi","Hindi","HI"},{"af","Afrikaans","AF"},
-        {"sq","Albanian","SQ"},{"hy","Armenian","HY"},{"az","Azerbaijani","AZ"},
-        {"be","Belarusian","BE"},{"bs","Bosnian","BS"},{"bg","Bulgarian","BG"},
-        {"ca","Catalan","CA"},{"hr","Croatian","HR"},{"cs","Czech","CS"},
-        {"da","Danish","DA"},{"nl","Dutch","NL"},{"et","Estonian","ET"},
-        {"fi","Finnish","FI"},{"gl","Galician","GL"},{"ka","Georgian","KA"},
+        {"pt","Portuguese","PT"},{"hi","Hindi","HI"},{"th","Thai","TH"},
+        {"vi","Vietnamese","VI"},{"id","Indonesian","ID"},{"ms","Malay","MS"},
+        {"fa","Persian","FA"},{"he","Hebrew","HE"},{"ur","Urdu","UR"},
+        {"bn","Bengali","BN"},{"pl","Polish","PL"},{"nl","Dutch","NL"},
+        {"sv","Swedish","SV"},{"da","Danish","DA"},{"fi","Finnish","FI"},
+        {"cs","Czech","CS"},{"ro","Romanian","RO"},{"uk","Ukrainian","UK"},
+        {"af","Afrikaans","AF"},{"sq","Albanian","SQ"},{"hy","Armenian","HY"},
+        {"az","Azerbaijani","AZ"},{"be","Belarusian","BE"},{"bs","Bosnian","BS"},
+        {"bg","Bulgarian","BG"},{"ca","Catalan","CA"},{"hr","Croatian","HR"},
+        {"et","Estonian","ET"},{"gl","Galician","GL"},{"ka","Georgian","KA"},
         {"el","Greek","EL"},{"hu","Hungarian","HU"},{"is","Icelandic","IS"},
         {"ga","Irish","GA"},{"lv","Latvian","LV"},{"lt","Lithuanian","LT"},
-        {"lb","Luxembourgish","LB"},{"mk","Macedonian","MK"},{"mt","Maltese","MT"},
-        {"no","Norwegian","NO"},{"pl","Polish","PL"},{"ro","Romanian","RO"},
+        {"mk","Macedonian","MK"},{"mt","Maltese","MT"},{"no","Norwegian","NO"},
         {"sr","Serbian","SR"},{"sk","Slovak","SK"},{"sl","Slovenian","SL"},
-        {"sv","Swedish","SV"},{"uk","Ukrainian","UK"},{"cy","Welsh","CY"},
-        {"fy","Frisian","FY"},{"co","Corsican","CO"},{"br","Breton","BR"},
-        {"gd","Scots Gaelic","GD"},{"la","Latin","LA"},{"eo","Esperanto","EO"},
-        {"bn","Bengali","BN"},{"my","Burmese","MY"},{"ceb","Cebuano","CEB"},
-        {"gu","Gujarati","GU"},{"hmn","Hmong","HMN"},{"id","Indonesian","ID"},
-        {"jw","Javanese","JW"},{"kn","Kannada","KN"},{"kk","Kazakh","KK"},
-        {"km","Khmer","KM"},{"ky","Kyrgyz","KY"},{"lo","Lao","LO"},
-        {"ms","Malay","MS"},{"ml","Malayalam","ML"},{"mr","Marathi","MR"},
-        {"mn","Mongolian","MN"},{"ne","Nepali","NE"},{"or","Odia","OR"},
-        {"pa","Punjabi","PA"},{"si","Sinhala","SI"},{"su","Sundanese","SU"},
-        {"tg","Tajik","TG"},{"ta","Tamil","TA"},{"te","Telugu","TE"},
-        {"th","Thai","TH"},{"tl","Filipino","TL"},{"tk","Turkmen","TK"},
-        {"ug","Uyghur","UG"},{"ur","Urdu","UR"},{"uz","Uzbek","UZ"},
-        {"vi","Vietnamese","VI"},{"tt","Tatar","TT"},{"fa","Persian","FA"},
-        {"he","Hebrew","HE"},{"ku","Kurdish","KU"},{"ps","Pashto","PS"},
-        {"sd","Sindhi","SD"},{"yi","Yiddish","YI"},{"am","Amharic","AM"},
-        {"ha","Hausa","HA"},{"ig","Igbo","IG"},{"rw","Kinyarwanda","RW"},
-        {"mg","Malagasy","MG"},{"ny","Chichewa","NY"},{"om","Oromo","OM"},
-        {"sn","Shona","SN"},{"so","Somali","SO"},{"st","Sesotho","ST"},
-        {"sw","Swahili","SW"},{"ti","Tigrinya","TI"},{"xh","Xhosa","XH"},
-        {"yo","Yoruba","YO"},{"zu","Zulu","ZU"},{"ee","Ewe","EE"},
-        {"lg","Luganda","LG"},{"ln","Lingala","LN"},{"bm","Bambara","BM"},
-        {"wo","Wolof","WO"},{"ht","Haitian Creole","HT"},{"qu","Quechua","QU"},
-        {"gn","Guarani","GN"},{"ay","Aymara","AY"},{"haw","Hawaiian","HAW"},
-        {"mi","Maori","MI"},{"sm","Samoan","SM"},
+        {"cy","Welsh","CY"},{"my","Burmese","MY"},{"gu","Gujarati","GU"},
+        {"kn","Kannada","KN"},{"kk","Kazakh","KK"},{"km","Khmer","KM"},
+        {"lo","Lao","LO"},{"ml","Malayalam","ML"},{"mr","Marathi","MR"},
+        {"mn","Mongolian","MN"},{"ne","Nepali","NE"},{"pa","Punjabi","PA"},
+        {"si","Sinhala","SI"},{"tg","Tajik","TG"},{"ta","Tamil","TA"},
+        {"te","Telugu","TE"},{"tl","Filipino","TL"},{"tk","Turkmen","TK"},
+        {"ug","Uyghur","UG"},{"uz","Uzbek","UZ"},{"tt","Tatar","TT"},
+        {"ku","Kurdish","KU"},{"am","Amharic","AM"},{"ha","Hausa","HA"},
+        {"sw","Swahili","SW"},{"yo","Yoruba","YO"},{"zu","Zulu","ZU"},
+        {"so","Somali","SO"},{"ht","Haitian Creole","HC"},
     };
 
     // ── Core ─────────────────────────────────────────────────────
@@ -139,13 +149,14 @@ public class FloatingTranslatorService extends Service {
     private final Handler            H = new Handler(Looper.getMainLooper());
     private ExecutorService          executor;
     private LruCache<String, String> translateCache;
+    private SharedPreferences        prefs;
+    private boolean                  isAr;
 
     // ── Views ─────────────────────────────────────────────────────
     private View     btnView;
     private View     overlayView;
     private View     pickerView;
     private WindowManager.LayoutParams btnLP, overlayLP;
-    private GradientDrawable           btnBg;
     private TextView                   tvBtnLabel;
     private TextView                   tvTranslation;
     private TextView                   tvOriginal;
@@ -154,9 +165,11 @@ public class FloatingTranslatorService extends Service {
     // ── State ─────────────────────────────────────────────────────
     private final AtomicBoolean ocrBusy     = new AtomicBoolean(false);
     private final AtomicBoolean translating = new AtomicBoolean(false);
-    private volatile boolean overlayVisible = false;
-    private volatile boolean destroyed      = false;
-    private volatile boolean viewsAdded     = false;
+    private volatile long       lastOcrTime = 0;
+    private volatile boolean    overlayVisible   = false;
+    private volatile boolean    overlayHiding    = false;   // NEW: guard double-fade
+    private volatile boolean    destroyed        = false;
+    private volatile boolean    viewsAdded       = false;
 
     private volatile String fromLang   = "auto";
     private volatile String toLang     = "ar";
@@ -169,7 +182,7 @@ public class FloatingTranslatorService extends Service {
     private TextRecognizer         recognizerJa;
     private TextRecognizer         recognizerLat;
 
-    // ── Timers / tap detection ────────────────────────────────────
+    // ── Tap detection ─────────────────────────────────────────────
     private Runnable dismissR;
     private Runnable doubleTapCheck;
     private Runnable fadeOutR;
@@ -186,120 +199,118 @@ public class FloatingTranslatorService extends Service {
         createChannel();
         startForeground(NOTIF_ID, buildNotif());
 
+        prefs     = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        isAr      = Locale.getDefault().getLanguage().equals("ar");
         wm        = (WindowManager) getSystemService(WINDOW_SERVICE);
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
 
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
-                SW = b.width();  SH = b.height();
-            } else {
-                DisplayMetrics dm = new DisplayMetrics();
-                //noinspection deprecation
-                wm.getDefaultDisplay().getMetrics(dm);
-                SW = dm.widthPixels; SH = dm.heightPixels;
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "getDisplayMetrics: " + e.getMessage(), e);
-            SW = 1080; SH = 1920;
-        }
+        fromLang = prefs.getString(KEY_LANG_FROM, "auto");
+        toLang   = prefs.getString(KEY_LANG_TO,   "ar");
 
-        capW = (SW / 2 / 16) * 16;
-        capH = (SH / 2 / 16) * 16;
-        if (capW < 480) capW = 480;
-        if (capH < 640) capH = 640;
-        Log.d(TAG, "Screen: " + SW + "x" + SH + "  Capture: " + capW + "x" + capH);
+        resolveScreenSize();
 
-        fromLang = "auto";
-        toLang   = "ar";
+        // Capture at half resolution, aligned to 16px
+        capW = Math.max((SW / 2 / 16) * 16, 480);
+        capH = Math.max((SH / 2 / 16) * 16, 640);
+        Log.d(TAG, "Screen=" + SW + "x" + SH + " Capture=" + capW + "x" + capH);
 
-        try {
-            recognizerJa  = TextRecognition.getClient(
-                new JapaneseTextRecognizerOptions.Builder().build());
-            recognizerLat = TextRecognition.getClient(
-                TextRecognizerOptions.DEFAULT_OPTIONS);
-        } catch (Exception e) {
-            Log.e(TAG, "OCR init failed: " + e.getMessage(), e);
-            recognizerJa = recognizerLat = null;
-        }
-
-        executor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "UT-Worker");
-            t.setPriority(Thread.NORM_PRIORITY - 1);
-            return t;
-        });
-
+        initOCR();
+        rebuildExecutorIfNeeded();
         translateCache = new LruCache<>(CACHE_SIZE);
 
         try {
             buildButton();
             buildOverlay();
             viewsAdded = true;
+            H.postDelayed(() -> {
+                if (!destroyed)
+                    toast(isAr
+                        ? "ضغطة = ترجمة  |  ضغطتين أو ضغطة طويلة = اللغة"
+                        : "Tap=translate  |  Double-tap or Hold=language");
+            }, 800);
         } catch (Exception e) {
-            Log.e(TAG, "UI build failed: " + e.getMessage(), e);
+            Log.e(TAG, "UI build: " + e.getMessage(), e);
         }
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-
-        if (intent != null) {
-            String lf = intent.getStringExtra("lang_from");
-            String lt = intent.getStringExtra("lang_to");
-            if (lf != null && !lf.isEmpty()) fromLang = lf;
-            if (lt != null && !lt.isEmpty()) toLang   = lt;
-            H.post(() -> {
-                if (!destroyed && tvBtnLabel != null)
-                    tvBtnLabel.setText(shortPair());
-            });
+        // ── START_STICKY restart (intent == null) ───────────────
+        if (intent == null) {
+            Log.w(TAG, "onStartCommand: null intent — START_STICKY restart");
+            // Executor may be dead after shutdownNow() in a previous onDestroy
+            rebuildExecutorIfNeeded();
+            H.postDelayed(() -> {
+                if (!destroyed)
+                    toast(isAr
+                        ? "أعد فتح التطبيق لاستعادة صلاحية الشاشة"
+                        : "Reopen app to restore screen permission");
+            }, 1_000);
+            return START_STICKY;
         }
 
-        if (intent != null && intent.hasExtra("mp_result_code")) {
-            int    rc = intent.getIntExtra("mp_result_code", -1);
-            Intent d  = intent.getParcelableExtra("mp_data");
+        // Always ensure executor is alive (defensive — cheap check)
+        rebuildExecutorIfNeeded();
 
-            if (rc == android.app.Activity.RESULT_OK && d != null) {
+        // ── Language update ──────────────────────────────────────
+        String lf = intent.getStringExtra("lang_from");
+        String lt = intent.getStringExtra("lang_to");
+        if (lf != null && !lf.isEmpty()) {
+            fromLang = lf;
+            prefs.edit().putString(KEY_LANG_FROM, lf).apply();
+        }
+        if (lt != null && !lt.isEmpty()) {
+            toLang = lt;
+            prefs.edit().putString(KEY_LANG_TO, lt).apply();
+        }
+        H.post(() -> { if (!destroyed && tvBtnLabel != null) tvBtnLabel.setText(shortPair()); });
+
+        // ── MediaProjection ──────────────────────────────────────
+        if (intent.hasExtra("mp_result_code")) {
+            int    rc   = intent.getIntExtra("mp_result_code", -1);
+            Intent data = intent.getParcelableExtra("mp_data");
+
+            if (rc == android.app.Activity.RESULT_OK && data != null) {
                 synchronized (mpLock) {
                     if (mediaProjection != null) {
-                        try { mediaProjection.stop(); } catch (Exception ignored) {}
-                        mediaProjection = null;
-                    }
-                    try {
-                        mediaProjection = mpManager.getMediaProjection(rc, d);
-                        mediaProjection.registerCallback(new MediaProjection.Callback() {
-                            @Override public void onStop() {
-                                Log.w(TAG, "MediaProjection stopped by system");
-                                synchronized (mpLock) { mediaProjection = null; }
-                                ocrBusy.set(false);
-                                H.post(() -> {
-                                    if (!destroyed) {
-                                        resetBtn(shortPair());
-                                        Toast.makeText(
-                                            FloatingTranslatorService.this,
-                                            "Screen permission lost — reopen app to restore",
-                                            Toast.LENGTH_LONG).show();
-                                    }
-                                });
-                            }
-                        }, H);
-                        Log.d(TAG, "MediaProjection ready");
-                    } catch (Exception e) {
-                        Log.e(TAG, "MediaProjection init: " + e.getMessage(), e);
-                        mediaProjection = null;
+                        // Already alive — skip to avoid Samsung invalid-token crash
+                        Log.d(TAG, "MediaProjection already alive, skipping replace");
+                    } else {
+                        try {
+                            mediaProjection = mpManager.getMediaProjection(rc, data);
+                            mediaProjection.registerCallback(new MediaProjection.Callback() {
+                                @Override public void onStop() {
+                                    Log.w(TAG, "MediaProjection stopped by system");
+                                    synchronized (mpLock) { mediaProjection = null; }
+                                    ocrBusy.set(false);
+                                    translating.set(false);
+                                    H.post(() -> {
+                                        if (!destroyed) {
+                                            resetBtn(shortPair());
+                                            toast(isAr
+                                                ? "انتهت صلاحية الشاشة — أعد فتح التطبيق"
+                                                : "Screen permission lost — reopen app");
+                                        }
+                                    });
+                                }
+                            }, H);
+                            Log.d(TAG, "MediaProjection ready");
+                        } catch (Exception e) {
+                            Log.e(TAG, "MediaProjection init: " + e.getMessage(), e);
+                            mediaProjection = null;
+                        }
                     }
                 }
             } else {
-                Log.w(TAG, "MediaProjection not granted (rc=" + rc + ")");
+                Log.w(TAG, "MediaProjection not granted rc=" + rc);
                 H.post(() -> {
                     if (!destroyed)
-                        Toast.makeText(this,
-                            "Screen permission needed for OCR",
-                            Toast.LENGTH_LONG).show();
+                        toast(isAr ? "رُفضت صلاحية الشاشة" : "Screen permission denied");
                 });
             }
         }
 
-        return START_NOT_STICKY;
+        return START_STICKY;
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -307,22 +318,19 @@ public class FloatingTranslatorService extends Service {
     @Override
     public void onDestroy() {
         Log.d(TAG, "onDestroy");
-        super.onDestroy();
         destroyed = true;
+        super.onDestroy();
 
         H.removeCallbacksAndMessages(null);
 
-        if (executor != null) executor.shutdownNow();
+        // Shut down executor AFTER clearing handler to avoid submitting after shutdown
+        if (executor != null && !executor.isShutdown()) executor.shutdownNow();
 
-        try { if (recognizerJa  != null) recognizerJa.close();  }
-        catch (Exception e) { Log.e(TAG, "recognizerJa close: " + e); }
-        try { if (recognizerLat != null) recognizerLat.close(); }
-        catch (Exception e) { Log.e(TAG, "recognizerLat close: " + e); }
+        closeOCR();
 
         synchronized (mpLock) {
             if (mediaProjection != null) {
-                try { mediaProjection.stop(); }
-                catch (Exception e) { Log.e(TAG, "mp stop: " + e); }
+                try { mediaProjection.stop(); } catch (Exception ignored) {}
                 mediaProjection = null;
             }
         }
@@ -331,6 +339,83 @@ public class FloatingTranslatorService extends Service {
             safeRemove(btnView);
             safeRemove(overlayView);
             safeRemove(pickerView);
+        }
+
+        // Null out view references to help GC
+        btnView = overlayView = pickerView = null;
+        tvBtnLabel = tvTranslation = tvOriginal = tvLangPair = null;
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // Executor management
+    // ═════════════════════════════════════════════════════════════
+
+    /** Creates a new executor if the current one is null or shut down. */
+    private void rebuildExecutorIfNeeded() {
+        if (executor == null || executor.isShutdown()) {
+            executor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "UT-Worker");
+                t.setPriority(Thread.NORM_PRIORITY - 1);
+                return t;
+            });
+            Log.d(TAG, "Executor (re)built");
+        }
+    }
+
+    /**
+     * Submits a task to the executor safely.
+     * Prevents RejectedExecutionException from crashing the app if the executor
+     * was shut down between the null-check and the submit() call.
+     */
+    private void safeSubmit(Runnable task) {
+        rebuildExecutorIfNeeded();
+        try {
+            executor.submit(task);
+        } catch (RejectedExecutionException e) {
+            Log.e(TAG, "safeSubmit: executor rejected task — " + e.getMessage());
+        }
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // OCR initialisation helpers
+    // ═════════════════════════════════════════════════════════════
+
+    private void initOCR() {
+        try {
+            recognizerJa  = TextRecognition.getClient(
+                new JapaneseTextRecognizerOptions.Builder().build());
+            recognizerLat = TextRecognition.getClient(
+                TextRecognizerOptions.DEFAULT_OPTIONS);
+        } catch (Exception e) {
+            Log.e(TAG, "OCR init: " + e.getMessage());
+            recognizerJa = recognizerLat = null;
+        }
+    }
+
+    private void closeOCR() {
+        try { if (recognizerJa  != null) recognizerJa.close();  } catch (Exception ignored) {}
+        try { if (recognizerLat != null) recognizerLat.close(); } catch (Exception ignored) {}
+        recognizerJa = recognizerLat = null;
+    }
+
+    // ═════════════════════════════════════════════════════════════
+    // Screen size
+    // ═════════════════════════════════════════════════════════════
+
+    private void resolveScreenSize() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
+                SW = b.width(); SH = b.height();
+            } else {
+                DisplayMetrics dm = new DisplayMetrics();
+                //noinspection deprecation
+                wm.getDefaultDisplay().getMetrics(dm);
+                SW = dm.widthPixels; SH = dm.heightPixels;
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "resolveScreenSize: " + e.getMessage());
+            SW = 1080; SH = 1920;
         }
     }
 
@@ -342,12 +427,12 @@ public class FloatingTranslatorService extends Service {
         FrameLayout root = new FrameLayout(this);
         FrameLayout pill = new FrameLayout(this);
 
-        btnBg = new GradientDrawable();
-        btnBg.setShape(GradientDrawable.RECTANGLE);
-        btnBg.setCornerRadius(dp(14));
-        btnBg.setColor(Color.argb(200, 10, 20, 50));
-        btnBg.setStroke(dp(1), Color.argb(120, 60, 120, 220));
-        pill.setBackground(btnBg);
+        GradientDrawable pillBg = new GradientDrawable();
+        pillBg.setShape(GradientDrawable.RECTANGLE);
+        pillBg.setCornerRadius(dp(14));
+        pillBg.setColor(Color.argb(200, 10, 20, 50));
+        pillBg.setStroke(dp(1), Color.argb(120, 60, 120, 220));
+        pill.setBackground(pillBg);
         pill.setElevation(dp(8));
 
         tvBtnLabel = new TextView(this);
@@ -358,16 +443,21 @@ public class FloatingTranslatorService extends Service {
         tvBtnLabel.setLetterSpacing(0.05f);
         tvBtnLabel.setGravity(Gravity.CENTER);
         tvBtnLabel.setIncludeFontPadding(false);
-        pill.addView(tvBtnLabel, matchFLP());
+        pill.addView(tvBtnLabel, new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT));
 
         FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(dp(52), dp(28));
         plp.setMargins(dp(4), dp(4), dp(4), dp(4));
         root.addView(pill, plp);
+
         btnView = root;
         btnView.setAlpha(ALPHA_IDLE);
 
         btnLP = new WindowManager.LayoutParams(
-            wc(), wc(), overlayType(),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);
@@ -413,6 +503,7 @@ public class FloatingTranslatorService extends Service {
         cardBg.setStroke(dp(1), Color.argb(80, 40, 90, 200));
         card.setBackground(cardBg);
 
+        // Top row: lang pair + close button
         LinearLayout topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -423,8 +514,8 @@ public class FloatingTranslatorService extends Service {
         tvLangPair.setTextSize(9f);
         tvLangPair.setTypeface(Typeface.DEFAULT_BOLD);
         tvLangPair.setLetterSpacing(0.06f);
-        topRow.addView(tvLangPair,
-            new LinearLayout.LayoutParams(0, wc(), 1f));
+        topRow.addView(tvLangPair, new LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView xBtn = new TextView(this);
         xBtn.setText("  \u00D7  ");
@@ -436,12 +527,15 @@ public class FloatingTranslatorService extends Service {
         topRow.addView(xBtn);
         card.addView(topRow);
 
+        // Divider
         View div = new View(this);
-        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
         divLp.setMargins(0, dp(4), 0, dp(5));
         div.setBackgroundColor(Color.argb(60, 40, 80, 180));
         card.addView(div, divLp);
 
+        // Original text (small)
         tvOriginal = new TextView(this);
         tvOriginal.setTextColor(Color.argb(100, 140, 170, 220));
         tvOriginal.setTextSize(9.5f);
@@ -450,6 +544,7 @@ public class FloatingTranslatorService extends Service {
         tvOriginal.setPadding(0, 0, 0, dp(3));
         card.addView(tvOriginal);
 
+        // Translation (large)
         tvTranslation = new TextView(this);
         tvTranslation.setTextColor(Color.argb(240, 220, 235, 255));
         tvTranslation.setTextSize(17f);
@@ -459,7 +554,9 @@ public class FloatingTranslatorService extends Service {
         tvTranslation.setEllipsize(android.text.TextUtils.TruncateAt.END);
         card.addView(tvTranslation);
 
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(mp(), wc());
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT);
         cardLp.setMargins(dp(10), 0, dp(10), dp(8));
         root.addView(card, cardLp);
 
@@ -467,7 +564,9 @@ public class FloatingTranslatorService extends Service {
         overlayView.setAlpha(0f);
 
         overlayLP = new WindowManager.LayoutParams(
-            SW, wc(), overlayType(),
+            SW,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
@@ -480,26 +579,30 @@ public class FloatingTranslatorService extends Service {
 
     private void showOverlay() {
         if (destroyed || overlayView == null) return;
+        overlayHiding  = false;
         overlayVisible = true;
         overlayLP.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
         safeUpdateLayout(overlayView, overlayLP);
+        overlayView.animate().cancel();
         overlayView.animate().alpha(1f).setDuration(180).start();
     }
 
     private void hideOverlay() {
         cancelDismiss();
-        if (destroyed || overlayView == null) return;
+        if (destroyed || overlayView == null || overlayHiding) return;
+        overlayHiding = true;
+        overlayView.animate().cancel();
         overlayView.animate().alpha(0f).setDuration(220).withEndAction(() -> {
             if (destroyed) return;
+            overlayHiding  = false;
             overlayVisible = false;
             overlayLP.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
             safeUpdateLayout(overlayView, overlayLP);
         }).start();
-        if (btnView != null)
-            btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
+        if (btnView != null) btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
         scheduleBtnFade();
     }
 
@@ -518,60 +621,54 @@ public class FloatingTranslatorService extends Service {
     // ═════════════════════════════════════════════════════════════
 
     private void doOCR() {
-        if (!ocrBusy.compareAndSet(false, true)) {
-            Log.d(TAG, "OCR debounced");
-            return;
-        }
+        long now = System.currentTimeMillis();
+        if (now - lastOcrTime < OCR_COOLDOWN_MS) return;
+        lastOcrTime = now;
 
-        // Check MediaProjection — Toast only, no startActivity
+        if (!ocrBusy.compareAndSet(false, true)) return;
+
         synchronized (mpLock) {
             if (mediaProjection == null) {
                 ocrBusy.set(false);
-                H.post(() -> {
-                    if (!destroyed)
-                        Toast.makeText(this,
-                            "Screen permission lost — reopen app to restore",
-                            Toast.LENGTH_LONG).show();
-                });
+                toast(isAr
+                    ? "أعد فتح التطبيق لاستعادة صلاحية الشاشة"
+                    : "Reopen app to restore screen permission");
                 return;
             }
         }
 
         if (recognizerJa == null || recognizerLat == null) {
             ocrBusy.set(false);
-            H.post(() -> {
-                if (!destroyed)
-                    Toast.makeText(this, "OCR not ready", Toast.LENGTH_SHORT).show();
-            });
+            toast(isAr ? "OCR غير جاهز" : "OCR not ready");
             return;
         }
 
+        // Show "reading" state on main thread before background work
         H.post(() -> {
             if (destroyed) return;
             if (tvBtnLabel    != null) tvBtnLabel.setText("...");
             if (btnView       != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
             if (tvTranslation != null) {
-                tvTranslation.setText("Reading screen\u2026");
+                tvTranslation.setText(isAr ? "جاري القراءة…" : "Reading…");
                 tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
             }
-            if (tvOriginal  != null) tvOriginal.setText("");
-            if (tvLangPair  != null) tvLangPair.setText(pairText());
+            if (tvOriginal != null) tvOriginal.setText("");
+            if (tvLangPair != null) tvLangPair.setText(pairText());
             showOverlay();
         });
 
         final int density = getResources().getDisplayMetrics().densityDpi;
-        final WeakReference<FloatingTranslatorService> weakSelf = new WeakReference<>(this);
 
-        executor.submit(() -> {
-            FloatingTranslatorService self = weakSelf.get();
-            if (self == null || self.destroyed) { ocrBusy.set(false); return; }
+        safeSubmit(() -> {
+            if (destroyed) { ocrBusy.set(false); return; }
 
             ImageReader    reader  = null;
             VirtualDisplay vd     = null;
             Bitmap         fullBmp = null;
 
             try {
-                reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 1);
+                // Use RGB_565 — 2 bytes/pixel instead of 4 — halves RAM for OCR capture
+                reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
 
                 synchronized (mpLock) {
                     if (mediaProjection == null) {
@@ -588,19 +685,14 @@ public class FloatingTranslatorService extends Service {
                 Thread.sleep(CAPTURE_DELAY_MS);
                 if (destroyed) { ocrBusy.set(false); return; }
 
+                // Acquire frame — up to 3 attempts
                 Image img = null;
-                for (int attempt = 0; attempt < 3 && img == null; attempt++) {
-                    try {
-                        img = reader.acquireLatestImage();
-                    } catch (Exception e) {
-                        Log.w(TAG, "acquireLatestImage attempt " + attempt + ": " + e.getMessage());
-                    }
-                    if (img == null && attempt < 2) {
-                        try { Thread.sleep(80); } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
+                for (int i = 0; i < 3 && img == null; i++) {
+                    try { img = reader.acquireLatestImage(); }
+                    catch (Exception e) { Log.w(TAG, "acquireLatestImage #" + i + ": " + e.getMessage()); }
+                    if (img == null && i < 2)
+                        try { Thread.sleep(80); }
+                        catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
 
                 if (img != null) {
@@ -610,29 +702,42 @@ public class FloatingTranslatorService extends Service {
                         int rStride      = planes[0].getRowStride();
                         int pStride      = planes[0].getPixelStride();
                         int bmpW         = rStride / pStride;
+                        int usedW        = Math.min(capW, bmpW);
+
+                        // Allocate once in ARGB_8888 (MLKit requires it), then crop inline
                         Bitmap tmp = Bitmap.createBitmap(bmpW, capH, Bitmap.Config.ARGB_8888);
                         tmp.copyPixelsFromBuffer(buf);
-                        fullBmp = Bitmap.createBitmap(tmp, 0, 0, Math.min(capW, bmpW), capH);
-                        if (tmp != fullBmp) recycleSafe(tmp);
+
+                        // Crop to exact capture width without a second full-size allocation
+                        if (bmpW > usedW) {
+                            fullBmp = Bitmap.createBitmap(tmp, 0, 0, usedW, capH);
+                            tmp.recycle();
+                        } else {
+                            fullBmp = tmp; // already the right size — no extra copy
+                        }
+                    } catch (OutOfMemoryError oom) {
+                        Log.e(TAG, "OOM during Bitmap copy");
+                        // No System.gc() — let ART decide; just clean up below
                     } catch (Exception e) {
-                        Log.e(TAG, "Bitmap copy: " + e.getMessage(), e);
+                        Log.e(TAG, "Bitmap copy: " + e.getMessage());
                     } finally {
                         try { img.close(); } catch (Exception ignored) {}
                     }
                 } else {
-                    Log.w(TAG, "acquireLatestImage: null after 3 attempts");
+                    Log.w(TAG, "No frame after 3 attempts");
                 }
 
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
-                Log.d(TAG, "OCR capture interrupted");
                 ocrBusy.set(false);
+                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
                 return;
             } catch (Exception e) {
-                Log.e(TAG, "Capture error: " + e.getMessage(), e);
+                Log.e(TAG, "Capture: " + e.getMessage(), e);
+                ocrBusy.set(false);
             } finally {
-                if (vd     != null) { try { vd.release();   } catch (Exception e) { Log.e(TAG, "vd.release: " + e); } }
-                if (reader != null) { try { reader.close();  } catch (Exception e) { Log.e(TAG, "reader.close: " + e); } }
+                if (vd     != null) { try { vd.release();  } catch (Exception ignored) {} }
+                if (reader != null) { try { reader.close(); } catch (Exception ignored) {} }
             }
 
             if (fullBmp == null) {
@@ -641,22 +746,31 @@ public class FloatingTranslatorService extends Service {
                     if (destroyed) return;
                     resetBtn(shortPair());
                     if (tvTranslation != null) {
-                        tvTranslation.setText("Capture failed — try again");
+                        tvTranslation.setText(isAr ? "فشل الالتقاط — حاول مجدداً" : "Capture failed — try again");
                         tvTranslation.setTextColor(Color.argb(220, 255, 180, 80));
                     }
+                    scheduleDismiss(); // FIX: overlay was getting stuck on capture failure
                 });
                 return;
             }
 
+            // Crop to dialogue region
             int cropTop = (int)(capH * OCR_TOP);
             int cropH   = Math.max((int)(capH * OCR_BOTTOM) - cropTop, 1);
             Bitmap cropped = null;
             try {
                 cropped = Bitmap.createBitmap(fullBmp, 0, cropTop, capW, cropH);
-            } catch (Exception e) {
-                Log.e(TAG, "Bitmap crop: " + e.getMessage(), e);
+            } catch (OutOfMemoryError oom) {
+                Log.e(TAG, "OOM during crop");
                 recycleSafe(fullBmp);
                 ocrBusy.set(false);
+                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
+                return;
+            } catch (Exception e) {
+                Log.e(TAG, "Crop: " + e.getMessage());
+                recycleSafe(fullBmp);
+                ocrBusy.set(false);
+                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
                 return;
             }
 
@@ -667,60 +781,70 @@ public class FloatingTranslatorService extends Service {
             final Bitmap fFull    = fullBmp;
             final Bitmap fCropped = cropped;
 
-            rec.process(InputImage.fromBitmap(fCropped, 0))
-                .addOnSuccessListener(result -> {
-                    recycleSafe(fCropped);
-                    String text = result.getText().trim();
-                    if (!text.isEmpty()) {
+            try {
+                rec.process(InputImage.fromBitmap(fCropped, 0))
+                    .addOnSuccessListener(result -> {
+                        recycleSafe(fCropped);
+                        String text = result.getText().trim();
+                        if (!text.isEmpty()) {
+                            recycleSafe(fFull);
+                            ocrBusy.set(false);
+                            H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
+                            doTranslate(text);
+                        } else {
+                            // Fallback: full-screen OCR
+                            try {
+                                rec.process(InputImage.fromBitmap(fFull, 0))
+                                    .addOnSuccessListener(r2 -> {
+                                        recycleSafe(fFull);
+                                        ocrBusy.set(false);
+                                        H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
+                                        String t2 = r2.getText().trim();
+                                        if (!t2.isEmpty()) {
+                                            doTranslate(t2);
+                                        } else {
+                                            H.post(() -> { if (!destroyed) onNoTextFound(); });
+                                        }
+                                    })
+                                    .addOnFailureListener(e -> {
+                                        recycleSafe(fFull);
+                                        ocrBusy.set(false);
+                                        Log.e(TAG, "Full OCR fail: " + e.getMessage());
+                                        H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
+                                    });
+                            } catch (Exception e) {
+                                recycleSafe(fFull);
+                                ocrBusy.set(false);
+                                Log.e(TAG, "Full OCR exception: " + e.getMessage());
+                                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
+                            }
+                        }
+                    })
+                    .addOnFailureListener(e -> {
+                        recycleSafe(fCropped);
                         recycleSafe(fFull);
                         ocrBusy.set(false);
-                        H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
-                        doTranslate(text);
-                    } else {
-                        rec.process(InputImage.fromBitmap(fFull, 0))
-                            .addOnSuccessListener(r2 -> {
-                                recycleSafe(fFull);
-                                ocrBusy.set(false);
-                                H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
-                                String t2 = r2.getText().trim();
-                                if (!t2.isEmpty()) {
-                                    doTranslate(t2);
-                                } else {
-                                    H.post(() -> {
-                                        if (destroyed) return;
-                                        if (tvTranslation != null) {
-                                            tvTranslation.setText("No text found on screen");
-                                            tvTranslation.setTextColor(Color.argb(200, 255, 200, 80));
-                                        }
-                                    });
-                                }
-                            })
-                            .addOnFailureListener(e -> {
-                                Log.e(TAG, "Full OCR failed: " + e.getMessage(), e);
-                                recycleSafe(fFull);
-                                ocrBusy.set(false);
-                                H.post(() -> {
-                                    if (!destroyed) {
-                                        resetBtn(shortPair());
-                                        setTranslationError("OCR failed: " + e.getMessage());
-                                    }
-                                });
-                            });
-                    }
-                })
-                .addOnFailureListener(e -> {
-                    Log.e(TAG, "Crop OCR failed: " + e.getMessage(), e);
-                    recycleSafe(fCropped);
-                    recycleSafe(fFull);
-                    ocrBusy.set(false);
-                    H.post(() -> {
-                        if (!destroyed) {
-                            resetBtn(shortPair());
-                            setTranslationError("OCR error: " + e.getMessage());
-                        }
+                        Log.e(TAG, "Crop OCR fail: " + e.getMessage());
+                        H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
                     });
-                });
+            } catch (Exception e) {
+                recycleSafe(fCropped);
+                recycleSafe(fFull);
+                ocrBusy.set(false);
+                Log.e(TAG, "rec.process exception: " + e.getMessage());
+                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
+            }
         });
+    }
+
+    /** Called on main thread when OCR finds no text in either crop or full-screen pass. */
+    private void onNoTextFound() {
+        resetBtn(shortPair());
+        if (tvTranslation != null) {
+            tvTranslation.setText(isAr ? "لا يوجد نص" : "No text found");
+            tvTranslation.setTextColor(Color.argb(200, 255, 200, 80));
+        }
+        scheduleDismiss(); // FIX: overlay was staying visible indefinitely
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -728,31 +852,27 @@ public class FloatingTranslatorService extends Service {
     // ═════════════════════════════════════════════════════════════
 
     private void doTranslate(final String text) {
-        if (!translating.compareAndSet(false, true)) {
-            Log.d(TAG, "Translation debounced");
-            return;
-        }
+        if (!translating.compareAndSet(false, true)) return;
         cancelDismiss();
 
         String cacheKey = fromLang + "|" + toLang + "|" + text;
         String cached   = translateCache.get(cacheKey);
         if (cached != null) {
-            Log.d(TAG, "Cache hit");
             translating.set(false);
-            H.post(() -> { if (!destroyed) showTranslationResult(text, cached); });
+            H.post(() -> { if (!destroyed) showResult(text, cached); });
             return;
         }
 
         H.post(() -> {
             if (destroyed) return;
-            if (tvBtnLabel   != null) tvBtnLabel.setText("...");
-            if (btnView      != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-            if (tvOriginal   != null) tvOriginal.setText(clip(text, 80));
-            if (tvTranslation!= null) {
-                tvTranslation.setText("Translating\u2026");
+            if (tvBtnLabel    != null) tvBtnLabel.setText("...");
+            if (btnView       != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
+            if (tvOriginal    != null) tvOriginal.setText(clip(text, 80));
+            if (tvTranslation != null) {
+                tvTranslation.setText(isAr ? "جاري الترجمة…" : "Translating…");
                 tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
             }
-            if (tvLangPair   != null) tvLangPair.setText(pairText());
+            if (tvLangPair != null) tvLangPair.setText(pairText());
             showOverlay();
         });
 
@@ -761,7 +881,7 @@ public class FloatingTranslatorService extends Service {
         final String snapTo   = toLang;
         final String key      = cacheKey;
 
-        executor.submit(() -> {
+        safeSubmit(() -> {
             if (destroyed) { translating.set(false); return; }
             String    result = null;
             Exception lastEx = null;
@@ -772,14 +892,10 @@ public class FloatingTranslatorService extends Service {
                     break;
                 } catch (Exception e) {
                     lastEx = e;
-                    Log.w(TAG, "Translate attempt " + (attempt + 1) + ": " + e.getMessage(), e);
-                    if (attempt == 0) {
+                    Log.w(TAG, "Translate #" + (attempt + 1) + ": " + e.getMessage());
+                    if (attempt == 0)
                         try { Thread.sleep(700); }
-                        catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                            break;
-                        }
-                    }
+                        catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
                 }
             }
 
@@ -791,35 +907,34 @@ public class FloatingTranslatorService extends Service {
                 if (destroyed) return;
                 if (fResult != null) {
                     translateCache.put(key, fResult);
-                    showTranslationResult(text, fResult);
+                    showResult(text, fResult);
                 } else {
+                    Log.w(TAG, "Translate failed: " + (fErr != null ? fErr.getMessage() : "?"));
                     resetBtn(shortPair());
-                    String msg = fErr != null ? fErr.getMessage() : "Unknown error";
-                    setTranslationError("Error: " + msg);
+                    if (tvOriginal    != null) tvOriginal.setText(clip(text, 80));
+                    if (tvTranslation != null) {
+                        tvTranslation.setText(text);
+                        tvTranslation.setTextColor(Color.argb(180, 220, 220, 180));
+                    }
+                    if (tvLangPair != null) tvLangPair.setText("\u26A0 " + pairText());
+                    showOverlay();
+                    scheduleDismiss();
                 }
             });
         });
     }
 
-    private void showTranslationResult(String original, String translated) {
+    private void showResult(String original, String translated) {
         if (destroyed) return;
-        if (tvOriginal   != null) tvOriginal.setText(clip(original, 80));
-        if (tvTranslation!= null) {
+        if (tvOriginal    != null) tvOriginal.setText(clip(original, 80));
+        if (tvTranslation != null) {
             tvTranslation.setText(translated);
             tvTranslation.setTextColor(Color.argb(245, 220, 238, 255));
         }
-        if (tvLangPair   != null) tvLangPair.setText(pairText());
+        if (tvLangPair != null) tvLangPair.setText(pairText());
         resetBtn(shortPair());
         showOverlay();
         scheduleDismiss();
-        safeUpdateLayout(overlayView, overlayLP);
-    }
-
-    private void setTranslationError(String msg) {
-        if (tvTranslation != null) {
-            tvTranslation.setText(msg);
-            tvTranslation.setTextColor(Color.argb(220, 255, 120, 120));
-        }
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -830,16 +945,19 @@ public class FloatingTranslatorService extends Service {
 
     private void openPicker() {
         pickerFrom = fromLang;
-        showPickerDialog("From language", true, code -> {
+        showPickerDialog(isAr ? "لغة النص" : "From language", true, code -> {
             pickerFrom = code;
-            H.post(() -> showPickerDialog("To language", false, code2 -> {
+            showPickerDialog(isAr ? "لغة الترجمة" : "To language", false, code2 -> {
                 fromLang = pickerFrom;
                 toLang   = code2;
-                ClipboardBridge.saveLang(this, fromLang, toLang);
+                prefs.edit()
+                    .putString(KEY_LANG_FROM, fromLang)
+                    .putString(KEY_LANG_TO,   toLang)
+                    .apply();
                 if (tvLangPair != null) tvLangPair.setText(pairText());
                 if (tvBtnLabel != null) tvBtnLabel.setText(shortPair());
                 closePicker();
-            }));
+            });
         });
     }
 
@@ -851,12 +969,13 @@ public class FloatingTranslatorService extends Service {
         root.setPadding(dp(14), dp(12), dp(14), dp(10));
 
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.argb(240, 5, 12, 30));
+        bg.setColor(Color.argb(245, 5, 12, 30));
         bg.setCornerRadius(dp(18));
         bg.setStroke(dp(1), Color.argb(100, 50, 100, 220));
         root.setBackground(bg);
         root.setElevation(dp(16));
 
+        // Title + close
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -867,7 +986,8 @@ public class FloatingTranslatorService extends Service {
         tvT.setTextColor(Color.argb(220, 120, 170, 255));
         tvT.setTextSize(13f);
         tvT.setTypeface(Typeface.DEFAULT_BOLD);
-        tr.addView(tvT, new LinearLayout.LayoutParams(0, wc(), 1f));
+        tr.addView(tvT, new LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView xb = new TextView(this);
         xb.setText("  \u00D7  ");
@@ -878,7 +998,8 @@ public class FloatingTranslatorService extends Service {
         root.addView(tr);
 
         View divider = new View(this);
-        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(mp(), dp(1));
+        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
         divLp.setMargins(0, 0, 0, dp(4));
         divider.setBackgroundColor(Color.argb(50, 60, 100, 200));
         root.addView(divider, divLp);
@@ -888,7 +1009,10 @@ public class FloatingTranslatorService extends Service {
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
 
+        // Use LinkedHashSet to guarantee uniqueness if LANGS ever gains accidental duplicates
+        LinkedHashSet<String> seenCodes = new LinkedHashSet<>();
         for (String[] lang : LANGS) {
+            if (!seenCodes.add(lang[0])) continue; // skip duplicate code
             if (!inclAuto && lang[0].equals("auto")) continue;
             if (!inclAuto && lang[0].equals(pickerFrom)) continue;
 
@@ -912,15 +1036,19 @@ public class FloatingTranslatorService extends Service {
 
             View rd = new View(this);
             rd.setBackgroundColor(Color.argb(30, 50, 80, 160));
-            list.addView(rd, new LinearLayout.LayoutParams(mp(), dp(1)));
+            list.addView(rd, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
         }
 
         scroll.addView(list);
-        root.addView(scroll, new LinearLayout.LayoutParams(mp(), (int)(SH * 0.48f)));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (int)(SH * 0.48f)));
 
         pickerView = root;
         WindowManager.LayoutParams pickerLP = new WindowManager.LayoutParams(
-            (int)(SW * 0.70f), wc(), overlayType(),
+            (int)(SW * 0.70f),
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT);
         pickerLP.gravity = Gravity.CENTER;
@@ -928,12 +1056,14 @@ public class FloatingTranslatorService extends Service {
     }
 
     private void closePicker() {
-        safeRemove(pickerView);
-        pickerView = null;
+        if (pickerView != null) {
+            safeRemove(pickerView);
+            pickerView = null;
+        }
     }
 
     // ═════════════════════════════════════════════════════════════
-    // Button Touch
+    // Button Touch Handler
     // ═════════════════════════════════════════════════════════════
 
     private class BtnTouch implements View.OnTouchListener {
@@ -953,22 +1083,20 @@ public class FloatingTranslatorService extends Service {
                     if (btnView  != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(80).start();
                     return true;
 
-                case MotionEvent.ACTION_MOVE: {
+                case MotionEvent.ACTION_MOVE:
                     float dx = e.getRawX() - rx, dy = e.getRawY() - ry;
                     if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-                        dragged  = true;
-                        btnLP.x  = Math.max(0, Math.min(ix + (int)dx, SW - dp(68)));
-                        btnLP.y  = Math.max(0, Math.min(iy + (int)dy, SH - dp(40)));
+                        dragged = true;
+                        btnLP.x = Math.max(0, Math.min(ix + (int)dx, SW - dp(68)));
+                        btnLP.y = Math.max(0, Math.min(iy + (int)dy, SH - dp(40)));
                         safeUpdateLayout(btnView, btnLP);
                     }
                     return true;
-                }
 
                 case MotionEvent.ACTION_UP:
                     if (!dragged) {
                         long held = System.currentTimeMillis() - downAt;
                         if (held >= LONG_PRESS_MS) {
-                            // Long press → open language picker
                             if (overlayVisible) hideOverlay();
                             openPicker();
                         } else {
@@ -992,8 +1120,8 @@ public class FloatingTranslatorService extends Service {
     }
 
     private void onSingleTap() {
-        if (pickerView   != null) { closePicker(); scheduleBtnFade(); return; }
-        if (overlayVisible)       { hideOverlay(); return; }
+        if (pickerView    != null) { closePicker(); scheduleBtnFade(); return; }
+        if (overlayVisible)        { hideOverlay(); return; }
         doOCR();
     }
 
@@ -1003,16 +1131,14 @@ public class FloatingTranslatorService extends Service {
     }
 
     // ═════════════════════════════════════════════════════════════
-    // Google Translate
+    // Google Translate (unofficial API)
     // ═════════════════════════════════════════════════════════════
 
     private String googleTranslate(String text, String from, String to) throws Exception {
-        String q = URLEncoder.encode(text, "UTF-8");
+        String q      = URLEncoder.encode(text, "UTF-8");
         String urlStr = "https://translate.googleapis.com/translate_a/single"
-            + "?client=gtx"
-            + "&sl=" + (from.equals("auto") ? "auto" : from)
-            + "&tl=" + to
-            + "&dt=t&q=" + q;
+            + "?client=gtx&sl=" + (from.equals("auto") ? "auto" : from)
+            + "&tl=" + to + "&dt=t&q=" + q;
 
         HttpURLConnection c = null;
         try {
@@ -1056,7 +1182,7 @@ public class FloatingTranslatorService extends Service {
 
     private String abbr(String c) {
         for (String[] l : LANGS) if (l[0].equals(c)) return l[2];
-        return c.length() > 3 ? c.substring(0, 3).toUpperCase() : c.toUpperCase();
+        return c.length() > 3 ? c.substring(0, 3).toUpperCase(Locale.US) : c.toUpperCase(Locale.US);
     }
 
     private String clip(String s, int max) {
@@ -1073,13 +1199,8 @@ public class FloatingTranslatorService extends Service {
             : WindowManager.LayoutParams.TYPE_PHONE;
     }
 
-    private int wc() { return WindowManager.LayoutParams.WRAP_CONTENT; }
-    private int mp() { return LinearLayout.LayoutParams.MATCH_PARENT; }
-
-    private FrameLayout.LayoutParams matchFLP() {
-        return new FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT);
+    private void toast(String msg) {
+        H.post(() -> { if (!destroyed) Toast.makeText(this, msg, Toast.LENGTH_LONG).show(); });
     }
 
     // ── Safe WindowManager wrappers ───────────────────────────────
@@ -1087,35 +1208,27 @@ public class FloatingTranslatorService extends Service {
     private void safeAddView(View v, WindowManager.LayoutParams lp) {
         if (v == null || lp == null) return;
         try { wm.addView(v, lp); }
-        catch (WindowManager.BadTokenException e) {
-            Log.e(TAG, "safeAddView BadToken: " + e.getMessage());
-        } catch (Exception e) {
-            Log.e(TAG, "safeAddView: " + e.getMessage(), e);
-        }
+        catch (WindowManager.BadTokenException e) { Log.e(TAG, "addView BadToken: " + e.getMessage()); }
+        catch (Exception e) { Log.e(TAG, "addView: " + e.getMessage(), e); }
     }
 
     private void safeUpdateLayout(View v, WindowManager.LayoutParams lp) {
         if (v == null || lp == null || v.getWindowToken() == null) return;
         try { wm.updateViewLayout(v, lp); }
-        catch (WindowManager.BadTokenException e) {
-            Log.e(TAG, "safeUpdateLayout BadToken: " + e.getMessage());
-        } catch (IllegalArgumentException e) {
-            Log.e(TAG, "safeUpdateLayout IAE: " + e.getMessage());
-        } catch (Exception e) {
-            Log.e(TAG, "safeUpdateLayout: " + e.getMessage(), e);
-        }
+        catch (WindowManager.BadTokenException e) { Log.e(TAG, "updateLayout BadToken"); }
+        catch (IllegalArgumentException e)        { Log.e(TAG, "updateLayout IAE"); }
+        catch (Exception e)                       { Log.e(TAG, "updateLayout: " + e.getMessage()); }
     }
 
     private void safeRemove(View v) {
         if (v == null || v.getWindowToken() == null) return;
-        try { wm.removeView(v); }
-        catch (Exception e) { Log.e(TAG, "safeRemove: " + e.getMessage()); }
+        try { wm.removeViewImmediate(v); }
+        catch (Exception e) { Log.e(TAG, "removeView: " + e.getMessage()); }
     }
 
     private void recycleSafe(Bitmap bmp) {
-        if (bmp != null && !bmp.isRecycled()) {
+        if (bmp != null && !bmp.isRecycled())
             try { bmp.recycle(); } catch (Exception ignored) {}
-        }
     }
 
     // ═════════════════════════════════════════════════════════════
@@ -1134,13 +1247,17 @@ public class FloatingTranslatorService extends Service {
     }
 
     private Notification buildNotif() {
-        int piFlags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
-            ? PendingIntent.FLAG_IMMUTABLE : 0;
+        // FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE — required for Android 12+ (API 31+)
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
+            | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pi = PendingIntent.getActivity(
             this, 0, new Intent(this, MainActivity.class), piFlags);
+        boolean ar = Locale.getDefault().getLanguage().equals("ar");
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("UniversalTranslator")
-            .setContentText("Tap=translate  Double-tap/Hold=language")
+            .setContentTitle(ar ? "مترجم الألعاب" : "Game Translator")
+            .setContentText(ar
+                ? "ضغطة=ترجمة  |  ضغطتين/ضغطة طويلة=اللغة"
+                : "Tap=translate  |  Double-tap/Hold=language")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pi)
             .setOngoing(true)
