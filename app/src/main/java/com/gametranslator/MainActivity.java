@@ -2,7 +2,6 @@ package com.gametranslator;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -84,12 +83,6 @@ public class MainActivity extends AppCompatActivity {
 
         prefs     = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-
-        // ── إذا الخدمة شغالة → أغلق فوراً بدون أي شيء ──────────
-        if (isServiceRunning()) {
-            finish();
-            return;
-        }
 
         // ── بناء الواجهة ─────────────────────────────────────────
         FrameLayout root = new FrameLayout(this);
@@ -223,16 +216,6 @@ public class MainActivity extends AppCompatActivity {
             setStatus("❌ فشل: " + e.getMessage());
             if (btnStart != null) btnStart.setEnabled(true);
         }
-    }
-
-    private boolean isServiceRunning() {
-        ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
-        if (am == null) return false;
-        for (ActivityManager.RunningServiceInfo s : am.getRunningServices(Integer.MAX_VALUE)) {
-            if (FloatingTranslatorService.class.getName().equals(s.service.getClassName()))
-                return true;
-        }
-        return false;
     }
 
     private void setStatus(String msg) {
