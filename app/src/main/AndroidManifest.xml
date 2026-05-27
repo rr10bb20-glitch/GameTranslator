@@ -1,43 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!--
-        Permissions — MINIMAL & JUSTIFIED
-        ══════════════════════════════════
-        SYSTEM_ALERT_WINDOW               → Floating translation overlay above game
-        FOREGROUND_SERVICE                → Required to run as foreground service
-        FOREGROUND_SERVICE_MEDIA_PROJECTION → MediaProjection API (required API 34+)
-        POST_NOTIFICATIONS                → Foreground service notification (API 33+)
-        INTERNET                          → Online translation API (HTTPS only)
-        ACCESS_NETWORK_STATE              → Detect connectivity for online/offline routing
-                                            (ConnectivityManager.registerNetworkCallback)
-
-        NOT requested (and never will be):
-        CAMERA · RECORD_AUDIO · READ_CONTACTS · ACCESS_FINE_LOCATION ·
-        READ_EXTERNAL_STORAGE · WRITE_EXTERNAL_STORAGE · ACCESSIBILITY_SERVICE
-    -->
-
-    <!-- Overlay: draw floating bubble above game screen -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- Foreground service base permission -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!-- MediaProjection foreground type — mandatory API 34+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-
-    <!-- Foreground service notification — mandatory API 33+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
-    <!-- HTTPS translation API calls -->
     <uses-permission android:name="android.permission.INTERNET" />
-
-    <!--
-        Network state — needed for ConnectivityManager.registerNetworkCallback().
-        Without this, registering the callback throws SecurityException on some
-        devices (Samsung, Xiaomi) and crashes the service silently.
-        This is a "normal" permission — no user dialog required.
-    -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
@@ -55,16 +23,8 @@
         android:theme="@style/Theme.GameTranslator"
         android:networkSecurityConfig="@xml/network_security_config">
 
-        <!--
-            MainActivity
-            ════════════
-            singleTop      → Prevents duplicate instances if user taps launcher twice
-                             while the translator is already running.
-            configChanges  → Handles rotation/density changes without recreating
-                             the Activity (avoids permission-flow restart mid-setup).
-        -->
         <activity
-            android:name=".ui.MainActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density"
@@ -77,21 +37,8 @@
             </intent-filter>
         </activity>
 
-        <!--
-            ScreenTranslatorService
-            ═══════════════════════
-            exported="false"             → Only this app can bind/start it.
-                                           Prevents third-party apps from
-                                           injecting intents or capturing tokens.
-            foregroundServiceType        → "mediaProjection" required by Android 14+
-                                           (API 34). Without this, createVirtualDisplay()
-                                           throws SecurityException at runtime.
-            stopWithTask="false"         → Service survives task removal (user swipes
-                                           app from recents). The service manages its
-                                           own lifecycle via START_STICKY.
-        -->
         <service
-            android:name=".service.ScreenTranslatorService"
+            android:name=".FloatingTranslatorService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"
             android:stopWithTask="false" />
