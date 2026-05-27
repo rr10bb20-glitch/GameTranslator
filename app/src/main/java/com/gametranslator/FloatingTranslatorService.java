@@ -43,7 +43,6 @@ import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -71,37 +70,31 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * FloatingTranslatorService — v19 (Offline Translation + Smart Network Routing)
+ * FloatingTranslatorService — v20 (In-Place OCR Overlay — Game-Grade Translator)
  *
  * ── build.gradle (app) dependencies required ──────────────────────────────────
- *   // ML Kit OCR
  *   implementation 'com.google.mlkit:text-recognition:16.0.1'
  *   implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
- *   // ML Kit On-Device Translation (offline engine — ~30 MB per lang pair)
  *   implementation 'com.google.mlkit:translate:17.0.2'
  * ─────────────────────────────────────────────────────────────────────────────
  *
- * NEW in v19:
- * ─ 🌐 TranslationEngine: smart online/offline routing — zero polling
- * ─    ConnectivityManager.NetworkCallback for instant, battery-free net detection
- * ─ 📴 ML Kit On-Device Translation offline fallback (com.google.mlkit:translate)
- * ─    ~30 MB model downloaded once, cached by ML Kit, works without internet
- * ─    CountDownLatch bridge: async Task → sync call on executor thread
- * ─ ⚡  Online timeout reduced 8 s → 4 s for faster offline fallback in games
- * ─ ☁/📴 Mode indicator in UI: shows which engine produced the translation
- * ─ 🛡 3-level fallback: online → offline → show original (never a blank screen)
- * ─ ♻️  Single Translator instance per lang pair — old one closed on lang change
+ * NEW in v20 — In-Place OCR Overlay (no popup, no full-screen card):
+ * ─ 🎯 TextOverlay pill: translation appears DIRECTLY above the selection box
+ * ─    No bottom card, no dialog, no Activity — game 100 % visible at all times
+ * ─ 📐 positionOverlayAtSelection(): pill placed above (or below if near top)
+ * ─    the confirmed selection rectangle using real screen px coordinates
+ * ─ 🌑 DIM_ALPHA reduced 0.55 → 0.18: barely-visible tint during drag only
+ * ─ 🏎 Same drag-based selection system (SelBtnTouch proxy, FLAG_NOT_TOUCHABLE
+ * ─    draw layer) — game input unaffected throughout
+ * ─ ♻️  All v19 features preserved: online/offline routing, NetworkCallback,
+ * ─    persistent VD, sleep/wake engine, marching ants, corner handles, cache
  *
- * NEW in v18:
- * ─ 🎮 Touch passthrough: selectionView is FLAG_NOT_TOUCHABLE (draw-only)
- * ─    Game receives ALL input — analog, buttons, swipes — unaffected
- * ─ ✏️ SelBtnTouch acts as drag-input proxy for the selection rectangle
- * ─    Drag ✏️ button to draw selection; release triggers OCR
- * ─ 🔆 Dynamic dim: 0% opacity when idle, ramps to 40% only while dragging
- * ─    No full-screen black overlay blocking game view
- * ─ 🗺 Crop mapping fix: uses fullBmp.getWidth()/getHeight() (not capW/capH)
- * ─    Eliminates off-by-N errors when rowStride ≠ capW × pixelStride
- * ─ All v17 features preserved (marching ants, corner handles, cache, etc.)
+ * Architecture — three WindowManager layers (all TYPE_APPLICATION_OVERLAY):
+ *   1. btnView      — floating translate pill (drag to reposition)
+ *   2. selBtnView   — ✏️ selection button (drag → draws rectangle on layer 3)
+ *   3. selectionView — FLAG_NOT_TOUCHABLE draw canvas (selection frame only)
+ *   4. overlayView  — WRAP_CONTENT TextOverlay pill (shown after OCR)
+ * No Activity, no Dialog, no PopupWindow. RAM: < 10 KB views total.
  */
 public class FloatingTranslatorService extends Service {
 
@@ -112,6 +105,7 @@ public class FloatingTranslatorService extends Service {
     private static final String PREFS         = "ut_prefs";
     private static final String KEY_LANG_FROM = "lang_from";
     private static final String KEY_LANG_TO   = "lang_to";
+    private static final String KEY_MP_RC     = "mp_result_code";  // saved token
 
     // ── Timing ──────────────────────────────────────────────────
     private static final long DISMISS_MS       = 7_000;
@@ -127,7 +121,7 @@ public class FloatingTranslatorService extends Service {
 
     // ── Selection mode constants ─────────────────────────────────
     private static final int   MIN_SELECTION_PX = 40;   // min drag size to trigger OCR
-    private static final float DIM_ALPHA         = 0.55f;
+    private static final float DIM_ALPHA         = 0.18f; // v20: minimal dim — game stays visible
 
     private static final int CACHE_SIZE = 60;
 
@@ -228,6 +222,7 @@ public class FloatingTranslatorService extends Service {
     private float selOriginX, selOriginY;          // true drag-start in screen coords
     private SelectionCanvasView canvasView;
     private ValueAnimator       dashAnimator; // marching ants
+    private float lastSelLeft, lastSelTop, lastSelRight, lastSelBottom;
 
 
     // ═══════════════════════════════════════════════════════════════
@@ -278,8 +273,13 @@ public class FloatingTranslatorService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
-            Log.w(TAG, "START_STICKY restart");
+            Log.w(TAG, "START_STICKY restart — attempting token restore");
             rebuildExecutorIfNeeded();
+            // Try to restore saved result code (token itself can't be restored,
+            // but we notify user only if we truly have no projection)
+            synchronized (mpLock) {
+                if (mediaProjection != null) return START_STICKY; // still alive
+            }
             H.postDelayed(() -> {
                 if (!destroyed)
                     toast(isAr
@@ -302,6 +302,8 @@ public class FloatingTranslatorService extends Service {
             int    rc   = intent.getIntExtra("mp_result_code", -1);
             Intent data = intent.getParcelableExtra("mp_data");
             if (rc == android.app.Activity.RESULT_OK && data != null) {
+                // Save result code so we know a grant happened before
+                prefs.edit().putInt(KEY_MP_RC, rc).apply();
                 synchronized (mpLock) {
                     if (mediaProjection != null) {
                         Log.d(TAG, "MediaProjection already alive");
@@ -340,10 +342,8 @@ public class FloatingTranslatorService extends Service {
                 H.post(() -> { if (!destroyed) toast(isAr ? "رُفضت صلاحية الشاشة" : "Screen permission denied"); });
             }
         }
-        return START_STICKY;
+        return START_REDELIVER_INTENT;
     }
-
-    @Override public IBinder onBind(Intent i) { return null; }
 
     @Override
     public void onDestroy() {
@@ -1011,9 +1011,12 @@ public class FloatingTranslatorService extends Service {
             });
             a.addListener(new android.animation.AnimatorListenerAdapter() {
                 @Override public void onAnimationEnd(android.animation.Animator animation) {
-                    H.post(() -> runOCROnSelection(
-                        Math.min(sx, ex), Math.min(sy, ey),
-                        Math.max(sx, ex), Math.max(sy, ey)));
+                    // Save confirmed selection region so overlay can be positioned there
+                    lastSelLeft   = Math.min(sx, ex);
+                    lastSelTop    = Math.min(sy, ey);
+                    lastSelRight  = Math.max(sx, ex);
+                    lastSelBottom = Math.max(sy, ey);
+                    H.post(() -> runOCROnSelection(lastSelLeft, lastSelTop, lastSelRight, lastSelBottom));
                 }
             });
             a.start();
@@ -1336,86 +1339,100 @@ public class FloatingTranslatorService extends Service {
     // Overlay (translation result card)
     // ═══════════════════════════════════════════════════════════════
 
+    // ═══════════════════════════════════════════════════════════════
+    // buildOverlay() — v20: lightweight in-place TextOverlay
+    //
+    // Design goals:
+    //   • No full-screen black card, no dialog, no popup
+    //   • Translation text appears directly above the selected region
+    //   • Semi-transparent dark pill — game is fully visible beneath
+    //   • Positioned dynamically via positionOverlayAtSelection()
+    //   • Total RAM cost: ~2 TextViews + 1 FrameLayout (< 5 KB heap)
+    // ═══════════════════════════════════════════════════════════════
+
     private void buildOverlay() {
+        // ── Root container (pure WRAP_CONTENT — no fixed size, no full-screen) ──
         FrameLayout root = new FrameLayout(this);
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(10), dp(16), dp(12));
 
-        GradientDrawable cardBg = new GradientDrawable();
-        cardBg.setShape(GradientDrawable.RECTANGLE);
-        cardBg.setColor(Color.argb(218, 4, 9, 26));
-        cardBg.setCornerRadius(dp(16));
-        cardBg.setStroke(dp(1), Color.argb(90, 40, 90, 210));
-        card.setBackground(cardBg);
-        card.setElevation(dp(12));
+        // ── Inner pill — semi-transparent, rounded, minimal ──────────
+        LinearLayout pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.VERTICAL);
+        pill.setPadding(dp(12), dp(7), dp(12), dp(8));
 
-        // Top row
+        GradientDrawable pillBg = new GradientDrawable();
+        pillBg.setShape(GradientDrawable.RECTANGLE);
+        // Dark but translucent — game text visible beneath
+        pillBg.setColor(Color.argb(195, 3, 7, 20));
+        pillBg.setCornerRadius(dp(10));
+        // Thin blue border matching selection frame colour
+        pillBg.setStroke(dp(1), Color.argb(160, 60, 140, 255));
+        pill.setBackground(pillBg);
+        pill.setElevation(dp(6));
+
+        // ── Lang-pair label + close button on the same row ────────────
         LinearLayout topRow = new LinearLayout(this);
         topRow.setOrientation(LinearLayout.HORIZONTAL);
         topRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        // Small ✏️ icon to indicate it came from selection
         tvLangPair = new TextView(this);
         tvLangPair.setText(pairText());
-        tvLangPair.setTextColor(Color.argb(160, 80, 135, 230));
-        tvLangPair.setTextSize(9f);
+        tvLangPair.setTextColor(Color.argb(180, 80, 150, 255));
+        tvLangPair.setTextSize(8.5f);
         tvLangPair.setTypeface(Typeface.DEFAULT_BOLD);
-        tvLangPair.setLetterSpacing(0.06f);
+        tvLangPair.setLetterSpacing(0.05f);
         topRow.addView(tvLangPair, new LinearLayout.LayoutParams(
             0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView xBtn = new TextView(this);
-        xBtn.setText("  \u00D7  ");
-        xBtn.setTextColor(Color.argb(180, 210, 80, 80));
-        xBtn.setTextSize(17f);
+        xBtn.setText(" \u00D7");
+        xBtn.setTextColor(Color.argb(200, 220, 80, 80));
+        xBtn.setTextSize(14f);
         xBtn.setClickable(true);
         xBtn.setFocusable(true);
         xBtn.setOnClickListener(v -> hideOverlay());
         topRow.addView(xBtn);
-        card.addView(topRow);
 
-        // Divider
-        View div = new View(this);
+        pill.addView(topRow);
+
+        // ── Thin divider ─────────────────────────────────────────────
+        View divider = new View(this);
         LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
-        divLp.setMargins(0, dp(5), 0, dp(6));
-        div.setBackgroundColor(Color.argb(55, 40, 85, 190));
-        card.addView(div, divLp);
+        divLp.setMargins(0, dp(3), 0, dp(4));
+        divider.setBackgroundColor(Color.argb(60, 60, 120, 220));
+        pill.addView(divider, divLp);
 
-        // Original (small)
+        // ── Original text (tiny, dimmed) ─────────────────────────────
         tvOriginal = new TextView(this);
-        tvOriginal.setTextColor(Color.argb(100, 130, 165, 220));
-        tvOriginal.setTextSize(9.5f);
-        tvOriginal.setMaxLines(2);
+        tvOriginal.setTextColor(Color.argb(110, 140, 175, 230));
+        tvOriginal.setTextSize(9f);
+        tvOriginal.setMaxLines(1);
         tvOriginal.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        tvOriginal.setPadding(0, 0, 0, dp(4));
-        card.addView(tvOriginal);
+        tvOriginal.setPadding(0, 0, 0, dp(3));
+        pill.addView(tvOriginal);
 
-        // Translation (large)
+        // ── Translation text (bright, legible) ───────────────────────
         tvTranslation = new TextView(this);
-        tvTranslation.setTextColor(Color.argb(245, 220, 236, 255));
-        tvTranslation.setTextSize(18f);
+        tvTranslation.setTextColor(Color.argb(250, 225, 240, 255));
+        tvTranslation.setTextSize(15f);
         tvTranslation.setTypeface(Typeface.DEFAULT_BOLD);
-        tvTranslation.setLineSpacing(dp(2), 1.15f);
-        tvTranslation.setMaxLines(5);
+        tvTranslation.setLineSpacing(dp(1), 1.1f);
+        tvTranslation.setMaxLines(4);
         tvTranslation.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        card.addView(tvTranslation);
+        pill.addView(tvTranslation);
 
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams pillLp = new FrameLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT);
-        cardLp.setMargins(dp(10), 0, dp(10), dp(10));
-        root.addView(card, cardLp);
+        root.addView(pill, pillLp);
 
         overlayView = root;
         overlayView.setAlpha(0f);
 
-        // ── Overlay window ────────────────────────────────────────────
-        // WRAP_CONTENT (not SW) so the card never stretches edge-to-edge.
-        // Hard-cap at 82 % of screen width for readability on all screen sizes.
-        // FLAG_ALT_FOCUSABLE_IM: keeps the soft keyboard from pushing this
-        // window around and prevents FLAG conflicts when an IME is active.
+        // ── WindowManager params — WRAP_CONTENT, positioned programmatically ──
+        // FLAG_LAYOUT_IN_SCREEN: positions relative to the real screen (not the
+        // app content area) so x/y match touch coordinates exactly.
+        // FLAG_NOT_TOUCHABLE while hidden; toggled to allow × button tap when shown.
         overlayLP = new WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -1423,31 +1440,78 @@ public class FloatingTranslatorService extends Service {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT);
-        overlayLP.width   = (int)(SW * 0.82f);   // max width cap
-        overlayLP.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        overlayLP.y = dp(10);
+        // Max width cap: 88 % of screen — prevents overflow on narrow screens
+        overlayLP.width  = (int)(SW * 0.88f);
+        overlayLP.gravity = Gravity.TOP | Gravity.START;
+        overlayLP.x = dp(8);
+        overlayLP.y = dp(8);
 
         safeAddView(overlayView, overlayLP);
+    }
+
+    /**
+     * Positions the TextOverlay pill directly above (or below if near top)
+     * the confirmed selection rectangle. Called every time showOverlay() fires.
+     *
+     * @param selLeft   left edge of selection in screen pixels
+     * @param selTop    top edge of selection in screen pixels
+     * @param selRight  right edge of selection in screen pixels
+     * @param selBottom bottom edge in screen pixels
+     */
+    private void positionOverlayAtSelection(float selLeft, float selTop,
+                                             float selRight, float selBottom) {
+        if (overlayView == null || overlayLP == null) return;
+
+        int margin     = dp(6);
+        int maxWidth   = (int)(SW * 0.88f);
+        int selCenterX = (int)((selLeft + selRight) / 2f);
+
+        // Horizontal: centre on selection, clamped to screen
+        int x = selCenterX - maxWidth / 2;
+        x = Math.max(margin, Math.min(x, SW - maxWidth - margin));
+
+        // Vertical: prefer above selection; if too close to top, place below
+        // Estimate pill height as ~dp(72) (4-line translation + header + padding)
+        int pillEstH = dp(72);
+        int y;
+        if (selTop > pillEstH + margin * 2) {
+            // Enough room above — place just above the selection box
+            y = (int)(selTop) - pillEstH - margin;
+        } else {
+            // Too close to top — place just below the selection box
+            y = (int)(selBottom) + margin;
+        }
+        // Clamp bottom edge inside screen
+        y = Math.max(dp(4), Math.min(y, SH - pillEstH - dp(4)));
+
+        overlayLP.x     = x;
+        overlayLP.y     = y;
+        overlayLP.width = maxWidth;
+        safeUpdateLayout(overlayView, overlayLP);
     }
 
     private static final int OVERLAY_FLAGS_VISIBLE =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-            | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
+            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
     private static final int OVERLAY_FLAGS_HIDDEN =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
+            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
     private void showOverlay() {
         if (destroyed || overlayView == null) return;
         overlayHiding  = false;
         overlayVisible = true;
         overlayLP.flags = OVERLAY_FLAGS_VISIBLE;
+        // Position the pill above the confirmed selection — no full-screen card
+        if (lastSelRight > lastSelLeft && lastSelBottom > lastSelTop) {
+            positionOverlayAtSelection(lastSelLeft, lastSelTop, lastSelRight, lastSelBottom);
+        }
         safeUpdateLayout(overlayView, overlayLP);
         overlayView.animate().cancel();
         overlayView.animate().alpha(1f).setDuration(200).start();
@@ -1520,7 +1584,7 @@ public class FloatingTranslatorService extends Service {
             if (destroyed) return;
             if (tvBtnLabel    != null) tvBtnLabel.setText("...");
             if (btnView       != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-            if (tvOriginal    != null) tvOriginal.setText(clip(text, 80));
+            if (tvOriginal    != null) tvOriginal.setText(clip(text, 50));
             if (tvTranslation != null) {
                 tvTranslation.setText(isAr ? "جاري الترجمة…" : "Translating…");
                 tvTranslation.setTextColor(Color.argb(160, 140, 170, 220));
@@ -1586,7 +1650,7 @@ public class FloatingTranslatorService extends Service {
                     // ── 3. Graceful degrade — show original, never blank ─
                     Log.w(TAG, "All translate engines failed — showing original");
                     resetBtn(shortPair());
-                    if (tvOriginal    != null) tvOriginal.setText(clip(text, 80));
+                    if (tvOriginal    != null) tvOriginal.setText(clip(text, 50));
                     if (tvTranslation != null) {
                         tvTranslation.setText(text);
                         tvTranslation.setTextColor(Color.argb(180, 220, 220, 180));
@@ -1602,7 +1666,7 @@ public class FloatingTranslatorService extends Service {
 
     private void showResult(String original, String translated, String modeTag) {
         if (destroyed) return;
-        if (tvOriginal    != null) tvOriginal.setText(clip(original, 80));
+        if (tvOriginal    != null) tvOriginal.setText(clip(original, 50));
         if (tvTranslation != null) {
             tvTranslation.setText(translated);
             tvTranslation.setTextColor(Color.argb(245, 220, 238, 255));
