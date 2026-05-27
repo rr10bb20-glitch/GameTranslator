@@ -49,11 +49,6 @@ import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
 
-import com.google.mlkit.nl.translate.DownloadConditions;
-import com.google.mlkit.nl.translate.TranslateLanguage;
-import com.google.mlkit.nl.translate.Translation;
-import com.google.mlkit.nl.translate.Translator;
-import com.google.mlkit.nl.translate.TranslatorOptions;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
@@ -70,11 +65,9 @@ import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.util.LinkedHashSet;
 import java.util.Locale;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -224,11 +217,6 @@ public class FloatingTranslatorService extends Service {
     private ConnectivityManager.NetworkCallback       netCallback;
     private ConnectivityManager                       cm;
 
-    // Offline translator (ML Kit on-device) — lazy-loaded per language pair
-    private volatile Translator  offlineTranslator;
-    private volatile String      offlinePairKey   = "";   // "from|to" currently loaded
-    private final AtomicBoolean  offlineReady     = new AtomicBoolean(false);
-    private final AtomicBoolean  offlineLoading   = new AtomicBoolean(false);
     private Runnable dismissR;
     private Runnable doubleTapCheck;
     private Runnable fadeOutR;
@@ -369,7 +357,6 @@ public class FloatingTranslatorService extends Service {
         if (executor != null && !executor.isShutdown()) executor.shutdownNow();
         closeOCR();
         stopNetworkMonitor();
-        closeOfflineTranslator();
 
         synchronized (mpLock) {
             releasePersistentCapture();
@@ -422,7 +409,6 @@ public class FloatingTranslatorService extends Service {
     //
     // What sleeps:
     //   • persistentVD + persistentReader  (VirtualDisplay / ImageReader — GPU resource)
-    //   • offlineTranslator                (ML Kit model handle)
     //   • executor thread                  (background thread)
     //
     // What stays alive 24/7 (all lightweight):
@@ -471,7 +457,6 @@ public class FloatingTranslatorService extends Service {
         }
 
         // 2. Release ML Kit offline translator
-        closeOfflineTranslator();
 
         // 3. Shut down executor thread
         if (executor != null && !executor.isShutdown()) {
@@ -1586,22 +1571,7 @@ public class FloatingTranslatorService extends Service {
                 }
             }
 
-            // ── 2. Offline fallback ──────────────────────────────────
-            if (result == null) {
-                if (offlineReady.get() && offlineTranslator != null) {
-                    try {
-                        result  = offlineTranslateSync(input);
-                        modeTag = "📴";
-                    } catch (Exception e) {
-                        Log.w(TAG, "Offline translate failed: " + e.getMessage());
-                    }
-                } else if (!offlineLoading.get()) {
-                    // Model not loaded — trigger lazy download, result will come next tap
-                    H.post(() -> {
-                        if (!destroyed) prepareOfflineTranslator(snapFrom, snapTo);
-                    });
-                }
-            }
+
 
             translating.set(false);
             final String fResult  = result;
@@ -1962,99 +1932,17 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ═══════════════════════════════════════════════════════════════
-    // TranslationEngine — Offline Engine (ML Kit On-Device)
-    //
-    // Architecture:
-    //  • Model is ~30 MB per language pair, downloaded once, cached by ML Kit
-    //  • prepareOfflineTranslator() is idempotent — safe to call on lang change
-    //  • offlineTranslateSync() bridges the async Task to a blocking call
-    //    using CountDownLatch — safe on the executor thread (never the main thread)
-    //  • RAM: ML Kit keeps the model in its own heap; we hold only a thin
-    //    Translator handle (~2 KB). Single model active at a time.
-    //
-    // build.gradle dependency needed:
-    //   implementation 'com.google.mlkit:translate:17.0.2'
-    // ═══════════════════════════════════════════════════════════════
-
     /**
      * Loads (or reuses) the ML Kit on-device translator for the given pair.
      * Called from the main thread; all heavy work happens on ML Kit's own threads.
      * Safe to call multiple times — no-op if the same pair is already loading/ready.
      */
-    private void prepareOfflineTranslator(String from, String to) {
-        String mlFrom = toMlKitLang(from.equals("auto") ? "en" : from);
-        String mlTo   = toMlKitLang(to);
-        if (mlFrom == null || mlTo == null) {
-            Log.d(TAG, "Offline: unsupported lang pair " + from + "→" + to);
-            return;
-        }
-
-        String pairKey = mlFrom + "|" + mlTo;
-        if (pairKey.equals(offlinePairKey) && (offlineReady.get() || offlineLoading.get())) return;
-
-        offlineReady.set(false);
-        offlineLoading.set(true);
-        offlinePairKey = pairKey;
-
-        // Close previous translator to free its model from ML Kit's cache
-        closeOfflineTranslator();
-
-        TranslatorOptions opts = new TranslatorOptions.Builder()
-            .setSourceLanguage(mlFrom)
-            .setTargetLanguage(mlTo)
-            .build();
-        Translator t = Translation.getClient(opts);
-        offlineTranslator = t;
-
-        // Download without WiFi requirement — model is small (~30 MB) and
-        // cached permanently. Use DownloadConditions.Builder().requireWifi()
-        // if you want to restrict downloads to WiFi only.
-        t.downloadModelIfNeeded(new DownloadConditions.Builder().build())
-            .addOnSuccessListener(v -> {
-                if (t == offlineTranslator) { // guard against stale callback
-                    offlineReady.set(true);
-                    Log.d(TAG, "Offline model ready: " + mlFrom + "→" + mlTo);
-                }
-                offlineLoading.set(false);
-            })
-            .addOnFailureListener(e -> {
-                offlineLoading.set(false);
-                Log.w(TAG, "Offline model download failed: " + e.getMessage());
-            });
-    }
 
     /**
      * Synchronous offline translation — MUST be called from a background thread.
      * Bridges ML Kit's async Task using CountDownLatch with a 3 s safety timeout.
      */
-    private String offlineTranslateSync(String text) throws Exception {
-        Translator t = offlineTranslator;
-        if (t == null || !offlineReady.get()) throw new Exception("Offline not ready");
 
-        CountDownLatch latch     = new CountDownLatch(1);
-        String[]       out       = {null};
-        Exception[]    err       = {null};
-
-        t.translate(text)
-            .addOnSuccessListener(r -> { out[0] = r; latch.countDown(); })
-            .addOnFailureListener(e -> { err[0] = e; latch.countDown(); });
-
-        boolean completed = latch.await(3, TimeUnit.SECONDS);
-        if (!completed)            throw new Exception("Offline translate timeout");
-        if (err[0] != null)        throw err[0];
-        if (out[0] == null || out[0].isEmpty()) throw new Exception("Offline empty result");
-        return out[0];
-    }
-
-    private void closeOfflineTranslator() {
-        Translator old = offlineTranslator;
-        offlineTranslator = null;
-        offlineReady.set(false);
-        if (old != null) {
-            try { old.close(); } catch (Exception ignored) {}
-        }
-    }
 
     /**
      * Maps app language codes to ML Kit TranslateLanguage constants.
@@ -2063,75 +1951,6 @@ public class FloatingTranslatorService extends Service {
      * ML Kit supports ~59 languages. Full list:
      * https://developers.google.com/ml-kit/language/translation/translation-language-support
      */
-    private String toMlKitLang(String code) {
-        if (code == null) return null;
-        switch (code.toLowerCase(Locale.US)) {
-            case "af": return TranslateLanguage.AFRIKAANS;
-            case "ar": return TranslateLanguage.ARABIC;
-            case "be": return TranslateLanguage.BELARUSIAN;
-            case "bg": return TranslateLanguage.BULGARIAN;
-            case "bn": return TranslateLanguage.BENGALI;
-            case "ca": return TranslateLanguage.CATALAN;
-            case "cs": return TranslateLanguage.CZECH;
-            case "cy": return TranslateLanguage.WELSH;
-            case "da": return TranslateLanguage.DANISH;
-            case "de": return TranslateLanguage.GERMAN;
-            case "el": return TranslateLanguage.GREEK;
-            case "en": return TranslateLanguage.ENGLISH;
-            case "eo": return TranslateLanguage.ESPERANTO;
-            case "es": return TranslateLanguage.SPANISH;
-            case "et": return TranslateLanguage.ESTONIAN;
-            case "fa": return TranslateLanguage.PERSIAN;
-            case "fi": return TranslateLanguage.FINNISH;
-            case "fr": return TranslateLanguage.FRENCH;
-            case "ga": return TranslateLanguage.IRISH;
-            case "gl": return TranslateLanguage.GALICIAN;
-            case "gu": return TranslateLanguage.GUJARATI;
-            case "he": return TranslateLanguage.HEBREW;
-            case "hi": return TranslateLanguage.HINDI;
-            case "hr": return TranslateLanguage.CROATIAN;
-            case "ht": return TranslateLanguage.HAITIAN_CREOLE;
-            case "hu": return TranslateLanguage.HUNGARIAN;
-            case "id": return TranslateLanguage.INDONESIAN;
-            case "is": return TranslateLanguage.ICELANDIC;
-            case "it": return TranslateLanguage.ITALIAN;
-            case "ja": return TranslateLanguage.JAPANESE;
-            case "ka": return TranslateLanguage.GEORGIAN;
-            case "kn": return TranslateLanguage.KANNADA;
-            case "ko": return TranslateLanguage.KOREAN;
-            case "lt": return TranslateLanguage.LITHUANIAN;
-            case "lv": return TranslateLanguage.LATVIAN;
-            case "mk": return TranslateLanguage.MACEDONIAN;
-            case "mr": return TranslateLanguage.MARATHI;
-            case "ms": return TranslateLanguage.MALAY;
-            case "mt": return TranslateLanguage.MALTESE;
-            case "nl": return TranslateLanguage.DUTCH;
-            case "no": return TranslateLanguage.NORWEGIAN;
-            case "pl": return TranslateLanguage.POLISH;
-            case "pt": return TranslateLanguage.PORTUGUESE;
-            case "ro": return TranslateLanguage.ROMANIAN;
-            case "ru": return TranslateLanguage.RUSSIAN;
-            case "sk": return TranslateLanguage.SLOVAK;
-            case "sl": return TranslateLanguage.SLOVENIAN;
-            case "sq": return TranslateLanguage.ALBANIAN;
-            case "sv": return TranslateLanguage.SWEDISH;
-            case "sw": return TranslateLanguage.SWAHILI;
-            case "ta": return TranslateLanguage.TAMIL;
-            case "te": return TranslateLanguage.TELUGU;
-            case "th": return TranslateLanguage.THAI;
-            case "tl": return TranslateLanguage.TAGALOG;
-            case "tr": return TranslateLanguage.TURKISH;
-            case "uk": return TranslateLanguage.UKRAINIAN;
-            case "ur": return TranslateLanguage.URDU;
-            case "vi": return TranslateLanguage.VIETNAMESE;
-            case "zh":
-            case "zh-cn":
-            case "zh-tw":
-            case "zh-hans":
-            case "zh-hant": return TranslateLanguage.CHINESE;
-            default:        return null; // unsupported — will skip offline mode
-        }
-    }
 
 
     // ═══════════════════════════════════════════════════════════════
