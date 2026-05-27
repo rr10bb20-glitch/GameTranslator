@@ -49,11 +49,11 @@ import android.widget.Toast;
 
 import androidx.core.app.NotificationCompat;
 
-import com.google.mlkit.vision.translate.DownloadConditions;
-import com.google.mlkit.vision.translate.TranslateLanguage;
-import com.google.mlkit.vision.translate.Translation;
-import com.google.mlkit.vision.translate.Translator;
-import com.google.mlkit.vision.translate.TranslatorOptions;
+import com.google.mlkit.nl.translate.DownloadConditions;
+import com.google.mlkit.nl.translate.TranslateLanguage;
+import com.google.mlkit.nl.translate.Translation;
+import com.google.mlkit.nl.translate.Translator;
+import com.google.mlkit.nl.translate.TranslatorOptions;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
