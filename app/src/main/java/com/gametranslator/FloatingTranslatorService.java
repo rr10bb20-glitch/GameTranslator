@@ -258,7 +258,7 @@ public class FloatingTranslatorService extends Service {
         super.onCreate();
         isAr = Locale.getDefault().getLanguage().equals("ar");
         createChannel();
-        startForeground(NOTIF_ID, buildNotif());
+        startForeground(NOTIF_ID, null);
 
         prefs     = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         wm        = (WindowManager) getSystemService(WINDOW_SERVICE);
