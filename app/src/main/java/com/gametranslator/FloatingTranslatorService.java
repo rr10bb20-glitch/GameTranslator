@@ -2353,27 +2353,28 @@ public class FloatingTranslatorService extends Service {
 
 
     static class ProgressiveOCR {
-        private static final Paint       P   = new Paint(Paint.FILTER_BITMAP_FLAG);
-        private static final ColorMatrix GM  = new ColorMatrix();
-        private static final ColorMatrix CM  = new ColorMatrix();
-        private static final ColorMatrix COM = new ColorMatrix();
+        // Cached objects — allocated once, reused on every OCR call
+        private static final Paint       PAINT = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private static final ColorMatrix GRAY  = new ColorMatrix();
+        private static final ColorMatrix CONT  = new ColorMatrix();
+        private static final ColorMatrix COMB  = new ColorMatrix();
 
         static {
-            GM.setSaturation(0f);
-            CM.set(new float[]{1.6f,0,0,0,-80, 0,1.6f,0,0,-80, 0,0,1.6f,0,-80, 0,0,0,1,0});
+            GRAY.setSaturation(0f);
+            CONT.set(new float[]{1.6f,0,0,0,-80, 0,1.6f,0,0,-80, 0,0,1.6f,0,-80, 0,0,0,1,0});
         }
 
-        static void run(final Bitmap src, final String lang, final int level,
-                        final BitmapPool pool, final OcrEngineManager mgr,
-                        final OcrEngineManager.OcrCallback cb) {
-            switch (level) {
-                case 0: mgr.runOcr(src, lang, cb); break;
-                case 1: runL1(src, lang, pool, mgr, cb); break;
-                case 2: runL2(src, lang, pool, mgr, cb); break;
-                default: runL3(src, lang, pool, mgr, cb); break;
-            }
+        /** Preprocess bitmap according to level, return result (may be same object). */
+        static Bitmap preprocess(Bitmap src, int level, BitmapPool pool) {
+            if (level <= 0 || src == null || src.isRecycled()) return src;
+            Bitmap c = applyContrast(src, pool);
+            if (level == 1) return c;
+            Bitmap u = (level >= 3) ? upscale(src) : src;
+            Bitmap c2 = (u != src) ? applyContrast(u, pool) : c;
+            if (u != src && c2 != c) pool.release(c);
+            Bitmap s = applySharpen(c2, pool);
+            if (s != c2) pool.release(c2);
+            return s;
         }
 
-        private static void runL1(final Bitmap s, final String l, final BitmapPool p, final OcrEngineManager m, final OcrEngineManager.OcrCallback cb) {
-            final Bitmap pr = contrast(s, p);
-            m.runOcr(pr, l, new OcrEngine
+        /** Run OCR at given level. Handles preprocessin
