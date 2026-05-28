@@ -43,6 +43,7 @@ import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -228,6 +229,9 @@ public class FloatingTranslatorService extends Service {
     // ═══════════════════════════════════════════════════════════════
     // Lifecycle
     // ═══════════════════════════════════════════════════════════════
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
 
     @Override
     public void onCreate() {
