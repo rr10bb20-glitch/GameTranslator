@@ -9,6 +9,9 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
+import android.net.Uri;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -185,6 +188,16 @@ public class FloatingTranslatorService extends Service {
     private WindowManager            wm;
     private int                      SW, SH;
     private int                      capW, capH;
+
+    // ── Projection health tracking ────────────────────────────────
+    // Counts consecutive null frames — if ≥ VD_NULL_FRAME_LIMIT the VD is stale
+    // (common in fullscreen games on Samsung when surface is recreated).
+    private static final int VD_NULL_FRAME_LIMIT = 3;
+    private int              vdNullFrameCount    = 0;
+    private volatile long    lastSuccessfulFrame = 0; // epoch ms
+    // Watchdog: if no frame in WATCHDOG_MS while VD is alive → force recreate
+    private static final long WATCHDOG_MS        = 8_000;
+    private Runnable          watchdogR;
     private final Handler            H = new Handler(Looper.getMainLooper());
     private ExecutorService          executor;
     private LruCache<String, String> translateCache;
@@ -339,7 +352,19 @@ public class FloatingTranslatorService extends Service {
                 H.post(() -> { if (!destroyed) toast(isAr ? "رُفضت صلاحية الشاشة" : "Screen permission denied"); });
             }
         }
-        return START_STICKY;
+
+        // Patch 5 — Samsung battery optimization bypass.
+        // Request user to whitelist this app exactly once.
+        // Without this, Samsung's Adaptive Battery / Device Care kills the service
+        // after ~10 min of game play even with START_STICKY + foreground notification.
+        requestBatteryOptimizationExemptionOnce();
+
+        // Patch 6 — Start projection watchdog.
+        // Periodically verifies VD is alive while service is running.
+        // Zero cost when idle (no VD created). Only checks when VD exists.
+        startProjectionWatchdog();
+
+        return START_REDELIVER_INTENT;
     }
 
     @Override
@@ -349,6 +374,7 @@ public class FloatingTranslatorService extends Service {
         super.onDestroy();
 
         H.removeCallbacksAndMessages(null);
+        stopProjectionWatchdog();
         if (executor != null && !executor.isShutdown()) executor.shutdownNow();
         closeOCR();
         stopNetworkMonitor();
@@ -453,6 +479,73 @@ public class FloatingTranslatorService extends Service {
     }
 
     /** Must be called while holding mpLock. */
+    /**
+     * Patch 5 — Samsung battery optimization exemption.
+     * Shows the system battery optimization settings exactly once.
+     * Samsung's "Adaptive Battery" / Device Care aggressively kills services
+     * after 5-10 min of background activity even with foreground notifications.
+     * This prompts the user to whitelist the app — a one-time action.
+     */
+    private static final String KEY_BATTERY_ASKED = "battery_asked";
+    private void requestBatteryOptimizationExemptionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        if (prefs.getBoolean(KEY_BATTERY_ASKED, false)) return;
+
+        android.os.PowerManager pm =
+            (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null) return;
+        if (pm.isIgnoringBatteryOptimizations(getPackageName())) return;
+
+        prefs.edit().putBoolean(KEY_BATTERY_ASKED, true).apply();
+        H.postDelayed(() -> {
+            if (destroyed) return;
+            try {
+                Intent intent = new Intent(
+                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + getPackageName()));
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                Log.d(TAG, "Battery optimization exemption requested");
+            } catch (Exception e) {
+                Log.w(TAG, "Battery exemption request failed: " + e.getMessage());
+            }
+        }, 3_000); // delay so it doesn't interrupt permission flow
+    }
+
+    /**
+     * Patch 6 — Projection watchdog.
+     * Runs every WATCHDOG_MS while VD is alive.
+     * Zero cost when idle (watchdog only fires if VD exists).
+     * Catches the case where Samsung kills the VD surface without calling onStop().
+     */
+    private void startProjectionWatchdog() {
+        stopProjectionWatchdog();
+        watchdogR = new Runnable() {
+            @Override public void run() {
+                if (destroyed) return;
+                synchronized (mpLock) {
+                    if (persistentVD != null && lastSuccessfulFrame > 0) {
+                        long age = System.currentTimeMillis() - lastSuccessfulFrame;
+                        if (age > WATCHDOG_MS) {
+                            Log.w(TAG, "Watchdog: VD stale (" + age + "ms) — releasing");
+                            releasePersistentCapture();
+                            // VD will be recreated on next OCR tap
+                        }
+                    }
+                }
+                H.postDelayed(this, WATCHDOG_MS);
+            }
+        };
+        H.postDelayed(watchdogR, WATCHDOG_MS);
+    }
+
+    private void stopProjectionWatchdog() {
+        if (watchdogR != null) {
+            H.removeCallbacks(watchdogR);
+            watchdogR = null;
+        }
+    }
+
     private void releasePersistentCapture() {
         if (persistentVD != null) {
             try { persistentVD.release(); } catch (Exception ignored) {}
@@ -461,6 +554,50 @@ public class FloatingTranslatorService extends Service {
         if (persistentReader != null) {
             try { persistentReader.close(); } catch (Exception ignored) {}
             persistentReader = null;
+        }
+        vdNullFrameCount = 0;
+    }
+
+    /**
+     * Patch 2 — Projection liveness check.
+     * Detects silent VD death before capture (common in fullscreen games on Samsung
+     * when the game surface is recreated or takes exclusive display control).
+     * Must be called while holding mpLock.
+     */
+    private boolean isProjectionAlive() {
+        if (mediaProjection == null) return false;
+        // VD alive but no frame delivered in WATCHDOG_MS → surface likely stolen by game
+        if (persistentVD != null && lastSuccessfulFrame > 0) {
+            long age = System.currentTimeMillis() - lastSuccessfulFrame;
+            if (age > WATCHDOG_MS) {
+                Log.w(TAG, "VD watchdog: no frame in " + age + " ms → force VD recreation");
+                releasePersistentCapture();
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Patch 3 — Safe VD recreation without re-requesting permission.
+     * Uses the existing (still-valid) MediaProjection token.
+     * Must be called on executor thread while holding mpLock.
+     */
+    private void recreateVirtualDisplay(int density) {
+        releasePersistentCapture();
+        if (mediaProjection == null) return;
+        try {
+            // Re-read screen dimensions in case game changed orientation/resolution
+            H.post(this::resolveScreenSize);
+            Thread.sleep(60);
+            persistentReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
+            persistentVD = mediaProjection.createVirtualDisplay(
+                "GT_CAP", capW, capH, density,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                persistentReader.getSurface(), null, null);
+            Log.d(TAG, "VD recreated " + capW + "x" + capH + " @" + density + "dpi");
+        } catch (Exception e) {
+            Log.e(TAG, "VD recreation failed: " + e.getMessage());
+            releasePersistentCapture();
         }
     }
 
@@ -892,14 +1029,22 @@ public class FloatingTranslatorService extends Service {
             try {
                 final boolean wasAlive;
                 synchronized (mpLock) {
-                    if (mediaProjection == null) {
+                    if (!isProjectionAlive()) {
+                        // Patch 4: token dead — notify user, don't crash
                         ocrBusy.set(false);
-                        H.post(() -> { if (!destroyed) { exitSelectionMode(); resetBtn(shortPair()); } });
+                        H.post(() -> {
+                            if (!destroyed) {
+                                exitSelectionMode();
+                                resetBtn(shortPair());
+                                toast(isAr
+                                    ? "افتح التطبيق لمنح صلاحية الشاشة"
+                                    : "Open the app to grant screen permission");
+                            }
+                        });
                         return;
                     }
                     wasAlive = (persistentReader != null && persistentVD != null);
                     if (!wasAlive) {
-                        // Full-resolution VirtualDisplay — capW==SW, capH==SH
                         persistentReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
                         persistentVD = mediaProjection.createVirtualDisplay(
                             "GT_CAP", capW, capH, density,
@@ -920,6 +1065,25 @@ public class FloatingTranslatorService extends Service {
                         try { Thread.sleep(80); } catch (InterruptedException ie) {
                             Thread.currentThread().interrupt(); break;
                         }
+                }
+
+                // Patch 4: null frame recovery — VD surface stolen by game
+                if (img == null) {
+                    vdNullFrameCount++;
+                    Log.w(TAG, "Null frame #" + vdNullFrameCount);
+                    if (vdNullFrameCount >= VD_NULL_FRAME_LIMIT) {
+                        Log.w(TAG, "VD appears stale — recreating");
+                        synchronized (mpLock) { recreateVirtualDisplay(density); }
+                        Thread.sleep(CAPTURE_DELAY_MS);
+                        // One more attempt after recreation
+                        if (persistentReader != null) {
+                            try { img = persistentReader.acquireLatestImage(); }
+                            catch (Exception e) { Log.w(TAG, "Post-recreate acquire: " + e.getMessage()); }
+                        }
+                    }
+                } else {
+                    vdNullFrameCount = 0;
+                    lastSuccessfulFrame = System.currentTimeMillis();
                 }
 
                 if (img != null) {
@@ -1660,24 +1824,6 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-    private Notification buildNotif() {
-        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
-            | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
-        PendingIntent pi = PendingIntent.getActivity(
-            this, 0, new Intent(this, MainActivity.class), piFlags);
-        boolean ar = Locale.getDefault().getLanguage().equals("ar");
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(ar ? "مترجم الألعاب" : "Game Translator")
-            .setContentText(ar
-                ? "✏️ للتحديد  |  ضغطتين/ضغطة طويلة = اللغة"
-                : "✏️ to select  |  Double-tap/Hold = language")
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
-            .setContentIntent(pi)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build();
-    }
-
     // ════════════════════════════════════════════════════════════════
     // OcrEngineManager — sleep/wake failover queue
     // Only one engine is active at a time. Others sleep (not initialized).
@@ -2125,4 +2271,91 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-}
+
+    // ════════════════════════════════════════════════════════════════
+    // Adaptive Performance System (APS) — v1
+    //
+    // Classes added:
+    //   AdaptivePerformanceManager — PowerMode state machine
+    //   ThermalMonitor             — zero-poll thermal awareness
+    //   BitmapPool                 — bitmap reuse, eliminates GC spam
+    //   ProgressiveOCR             — 4-level OCR pipeline
+    //
+    // INTEGRATION (minimal changes to existing code):
+    //
+    // 1. Add fields to service:
+    //      private AdaptivePerformanceManager aps;
+    //      private BitmapPool bitmapPool;
+    //
+    // 2. In onCreate() after initOcrEngineManager():
+    //      bitmapPool = new BitmapPool();
+    //      aps = new AdaptivePerformanceManager(ocrEngineManager, bitmapPool, H);
+    //      aps.onEnterLow = this::enterEngineSleep;
+    //      aps.onExitLow  = this::wakeEngine;
+    //      aps.start(this);
+    //
+    // 3. In onDestroy():
+    //      if (aps != null) aps.stop();
+    //      if (bitmapPool != null) bitmapPool.clear();
+    //
+    // 4. Replace ocrEngineManager.runOcr(...) in runOCROnSelection with:
+    //      aps.onUserAction();
+    //      int level = aps.preprocessingLevel();
+    //      ProgressiveOCR.run(fCropped, snapFrom, level, bitmapPool, ocrEngineManager,
+    //          new OcrEngineManager.OcrCallback() {
+    //              public void onSuccess(String text) {
+    //                  if (text.isEmpty()) aps.onOcrEmpty();
+    //                  else aps.onOcrComplete(true);
+    //                  // ... rest of existing onSuccess ...
+    //              }
+    //              public void onFailure(String r) {
+    //                  aps.onOcrComplete(false);
+    //                  // ... rest of existing onFailure ...
+    //              }
+    //          });
+    //
+    // 5. Remove all Runtime.getRuntime().gc() calls — BitmapPool eliminates the need.
+    // ════════════════════════════════════════════════════════════════
+
+    enum PowerMode { LOW, NORMAL, HIGH, TURBO }
+
+    static class AdaptivePerformanceManager {
+        private static final String TAG_APS = "GT-APS";
+        private static final long IDLE_TO_LOW_MS    = 5_000;
+        private static final long HIGH_STEP_DOWN_MS = 3_000;
+        private static final long TURBO_STEP_DOWN_MS= 5_000;
+
+        private volatile PowerMode mode = PowerMode.NORMAL;
+        private final Handler H;
+        private final ThermalMonitor thermal;
+        private Runnable stepDownR;
+
+        Runnable onEnterLow;
+        Runnable onExitLow;
+        Runnable onTurbo;
+
+        AdaptivePerformanceManager(OcrEngineManager ocr, BitmapPool pool, Handler h) {
+            this.H = h;
+            this.thermal = new ThermalMonitor();
+        }
+
+        void start(Context ctx) {
+            thermal.start(ctx, headroom -> {
+                if (headroom < 0.3f && mode.ordinal() >= PowerMode.HIGH.ordinal()) {
+                    Log.w(TAG_APS, "Thermal throttle → NORMAL (headroom=" + headroom + ")");
+                    transitionTo(PowerMode.NORMAL, "thermal");
+                }
+            });
+            scheduleStepDown(IDLE_TO_LOW_MS);
+        }
+
+        void stop() { thermal.stop(); cancelStepDown(); }
+
+        PowerMode getMode() { return mode; }
+
+        void onUserAction() {
+            cancelStepDown();
+            if (mode == PowerMode.LOW) {
+                Log.d(TAG_APS, "Wake from LOW");
+                if (onExitLow != null) H.post(onExitLow);
+       
