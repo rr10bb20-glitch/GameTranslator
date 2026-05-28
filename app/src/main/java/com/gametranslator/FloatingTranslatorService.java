@@ -1760,6 +1760,24 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
+    private Notification buildNotif() {
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT
+            | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
+        PendingIntent pi = PendingIntent.getActivity(
+            this, 0, new Intent(this, MainActivity.class), flags);
+        boolean ar = Locale.getDefault().getLanguage().equals("ar");
+        return new NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(ar ? "مترجم الألعاب" : "Game Translator")
+            .setContentText(ar
+                ? "✏️ للتحديد  |  ضغطتين/ضغطة طويلة = اللغة"
+                : "✏️ to select  |  Double-tap/Hold = language")
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
+            .setContentIntent(pi)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build();
+    }
+
     // ════════════════════════════════════════════════════════════════
     // OcrEngineManager — sleep/wake failover queue
     // Only one engine is active at a time. Others sleep (not initialized).
