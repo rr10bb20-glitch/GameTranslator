@@ -2363,9 +2363,9 @@ public class FloatingTranslatorService extends Service {
             CM.set(new float[]{1.6f,0,0,0,-80, 0,1.6f,0,0,-80, 0,0,1.6f,0,-80, 0,0,0,1,0});
         }
 
-        static void run(Bitmap src, String lang, int level,
-                        BitmapPool pool, OcrEngineManager mgr,
-                        OcrEngineManager.OcrCallback cb) {
+        static void run(final Bitmap src, final String lang, final int level,
+                        final BitmapPool pool, final OcrEngineManager mgr,
+                        final OcrEngineManager.OcrCallback cb) {
             switch (level) {
                 case 0: mgr.runOcr(src, lang, cb); break;
                 case 1: runL1(src, lang, pool, mgr, cb); break;
@@ -2374,7 +2374,6 @@ public class FloatingTranslatorService extends Service {
             }
         }
 
-        private static void runL1(Bitmap s, String l, BitmapPool p, OcrEngineManager m, OcrEngineManager.OcrCallback cb) {
+        private static void runL1(final Bitmap s, final String l, final BitmapPool p, final OcrEngineManager m, final OcrEngineManager.OcrCallback cb) {
             final Bitmap pr = contrast(s, p);
-            m.runOcr(pr, l, new OcrEngineManager.OcrCallback() {
-                public void onSuccess(Stri
+            m.runOcr(pr, l, new OcrEngine
