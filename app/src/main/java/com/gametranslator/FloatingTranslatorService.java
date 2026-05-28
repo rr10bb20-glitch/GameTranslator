@@ -2375,6 +2375,6 @@ public class FloatingTranslatorService extends Service {
         }
 
         private static void runL1(Bitmap s, String l, BitmapPool p, OcrEngineManager m, OcrEngineManager.OcrCallback cb) {
-            Bitmap pr = contrast(s, p);
+            final Bitmap pr = contrast(s, p);
             m.runOcr(pr, l, new OcrEngineManager.OcrCallback() {
-                public void onSuccess(String t) 
+                public void onSuccess(Stri
