@@ -4,11 +4,16 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.JavascriptInterface;
+import android.widget.Toast;
+
+import java.util.Locale;
 
 public class ClipboardBridge {
 
-    private static final String PREFS_NAME = "translator_prefs";
+    private static final String PREFS_NAME   = "translator_prefs";
     private static final String KEY_FROM_LANG = "from_lang";
     private static final String KEY_TO_LANG   = "to_lang";
 
@@ -18,7 +23,9 @@ public class ClipboardBridge {
         this.context = context;
     }
 
-    // ── Clipboard ──
+    // ══════════════════════════════════════════════════════
+    // الـ methods القديمة — ما مسيناها
+    // ══════════════════════════════════════════════════════
 
     @JavascriptInterface
     public String getText() {
@@ -46,8 +53,6 @@ public class ClipboardBridge {
         } catch (Exception ignored) {}
     }
 
-    // ── إعدادات اللغة — يحفظها الـ HTML، يقرأها الـ Service ──
-
     @JavascriptInterface
     public void saveLanguages(String fromLang, String toLang) {
         try {
@@ -71,8 +76,6 @@ public class ClipboardBridge {
         return prefs.getString(KEY_TO_LANG, "ar");
     }
 
-    // ── static helper — يستخدمه الـ Service مباشرة بدون WebView ──
-
     public static String readFromLang(Context ctx) {
         SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         return prefs.getString(KEY_FROM_LANG, "auto");
@@ -83,18 +86,65 @@ public class ClipboardBridge {
         return prefs.getString(KEY_TO_LANG, "ar");
     }
 
-    // يتحقق إذا اختار المستخدم لغة من قبل
     public static boolean hasLanguageSaved(Context ctx) {
         return ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                   .contains(KEY_TO_LANG);
     }
 
-    // يستخدمه الـ Service بعد اختيار اللغة من القائمة العائمة
     public static void saveLang(Context ctx, String fromLang, String toLang) {
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
            .edit()
            .putString(KEY_FROM_LANG, fromLang)
            .putString(KEY_TO_LANG, toLang)
            .apply();
+    }
+
+    // ══════════════════════════════════════════════════════
+    // methods جديدة — يطلبها BubbleOverlay + FloatingTranslatorService
+    // ══════════════════════════════════════════════════════
+
+    // pending debounce runnable
+    private static Runnable pendingCopy;
+    private static final Handler H = new Handler(Looper.getMainLooper());
+    private static final long DEBOUNCE_MS = 400;
+
+    /**
+     * يستخدمه BubbleOverlay عند long-press:
+     * ClipboardBridge.copy(ctx, text, true)
+     */
+    public static void copy(Context context, String text, boolean showToast) {
+        if (text == null || text.isEmpty()) return;
+
+        // إلغاء أي copy معلق
+        if (pendingCopy != null) H.removeCallbacks(pendingCopy);
+
+        final Context appCtx = context.getApplicationContext();
+        pendingCopy = () -> {
+            pendingCopy = null;
+            try {
+                ClipboardManager cm = (ClipboardManager)
+                    appCtx.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm == null) return;
+                cm.setPrimaryClip(ClipData.newPlainText("translation", text));
+                if (showToast) {
+                    boolean ar = Locale.getDefault().getLanguage().equals("ar");
+                    Toast.makeText(appCtx,
+                        ar ? "تم النسخ إلى الحافظة" : "Copied to clipboard",
+                        Toast.LENGTH_SHORT).show();
+                }
+            } catch (Exception ignored) {}
+        };
+        H.postDelayed(pendingCopy, DEBOUNCE_MS);
+    }
+
+    /**
+     * يستخدمه FloatingTranslatorService.onDestroy():
+     * ClipboardBridge.cancel()
+     */
+    public static void cancel() {
+        if (pendingCopy != null) {
+            H.removeCallbacks(pendingCopy);
+            pendingCopy = null;
+        }
     }
 }
