@@ -3,39 +3,14 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.gametranslator">
 
-    <!-- ═══════════════════════════════════════════════════════════════
-         Permissions
-    ════════════════════════════════════════════════════════════════ -->
-
-    <!-- Floating overlay windows (required for all overlay views) -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-
-    <!-- Foreground service (required for MediaProjection on API 29+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!--
-        mediaProjection foreground service type — REQUIRED on API 34+.
-        Without this Android 14 kills the service immediately when
-        createVirtualDisplay() is called outside a declared type.
-    -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-
-    <!-- Network: Google Translate endpoint -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- Battery: allow background OCR without Doze killing the service -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-
-    <!--
-        POST_NOTIFICATIONS — required on API 33+ for the foreground notification.
-        Declared here; runtime request handled by PermissionOnboardingActivity.
-    -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- ═══════════════════════════════════════════════════════════════
-         Application
-    ════════════════════════════════════════════════════════════════ -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -45,41 +20,18 @@
         android:theme="@style/Theme.GameTranslator"
         tools:targetApi="34">
 
-        <!-- ── PermissionOnboardingActivity ──────────────────────────
-             LAUNCHER entry point. Shows permission explanation screens
-             before requesting anything. Skips itself if all critical
-             permissions are already granted (re-launches scenario).
-        ─────────────────────────────────────────────────────────── -->
         <activity
-            android:name=".PermissionOnboardingActivity"
+            android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:theme="@style/Theme.GameTranslator">
-
+            android:theme="@style/Theme.Transparent"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- ── MainActivity ──────────────────────────────────────────
-             No longer the LAUNCHER. Started by PermissionOnboardingActivity
-             after all permissions are resolved.
-             Transparent theme preserved for overlay broker role.
-        ─────────────────────────────────────────────────────────── -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="false"
-            android:launchMode="singleTask"
-            android:theme="@style/Theme.Transparent"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize" />
-
-        <!-- ── FloatingTranslatorService ────────────────────────────
-             foregroundServiceType="mediaProjection" is required on
-             API 29+ for MediaProjection inside a foreground service.
-             On API 34+ it also needs the FOREGROUND_SERVICE_MEDIA_PROJECTION
-             permission (declared above).
-        ─────────────────────────────────────────────────────────── -->
         <service
             android:name=".FloatingTranslatorService"
             android:exported="false"
