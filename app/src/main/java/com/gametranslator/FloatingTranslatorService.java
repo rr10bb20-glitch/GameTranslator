@@ -119,7 +119,7 @@ public class FloatingTranslatorService extends Service {
     private static final int CACHE_SIZE = 60;
 
     // Debug: set true to save cropped bitmap for inspection
-    private static final boolean DEBUG_CROP = true;  // TODO: set false before release
+    private static final boolean DEBUG_CROP = false;
 
     // ── Supported languages ───────────────────────────────────────────
     private static final String[][] LANGS = {
@@ -419,14 +419,37 @@ public class FloatingTranslatorService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
                 SW = b.width(); SH = b.height();
+                Log.d(TAG, "resolveScreenSize [API30+]: " + SW + "x" + SH);
             } else {
                 DisplayMetrics dm = new DisplayMetrics();
                 //noinspection deprecation
                 wm.getDefaultDisplay().getRealMetrics(dm);   // getRealMetrics > getMetrics for full panel
                 SW = dm.widthPixels; SH = dm.heightPixels;
+                Log.d(TAG, "resolveScreenSize [getRealMetrics]: " + SW + "x" + SH);
             }
         } catch (Exception e) { SW = 1080; SH = 1920; }
         Log.d(TAG, "screen=" + SW + "x" + SH);
+    }
+
+    /**
+     * Returns [liveW, liveH] — current physical screen dimensions read live
+     * from WindowManager without mutating SW/SH.
+     * Safe to call from any thread; falls back to SW/SH on error.
+     */
+    private int[] liveScreenSize() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
+                return new int[]{ b.width(), b.height() };
+            } else {
+                DisplayMetrics dm = new DisplayMetrics();
+                //noinspection deprecation
+                wm.getDefaultDisplay().getRealMetrics(dm);
+                return new int[]{ dm.widthPixels, dm.heightPixels };
+            }
+        } catch (Exception e) {
+            return new int[]{ SW, SH };   // safe fallback
+        }
     }
 
 
@@ -568,10 +591,17 @@ public class FloatingTranslatorService extends Service {
                         strokeView.addPoint(e.getRawX(), e.getRawY());
                         RectF box = strokeView.getBoundingBox();
                         if (box.width() > MIN_STROKE_PX && box.height() > MIN_STROKE_PX) {
-                            lastStrokeLeft   = Math.max(0, box.left);
-                            lastStrokeTop    = Math.max(0, box.top);
-                            lastStrokeRight  = Math.min(SW, box.right);
-                            lastStrokeBottom = Math.min(SH, box.bottom);
+                            // [FIX-D] Clamp against live screen — not stale SW/SH
+                            final int[] liveClamp = liveScreenSize();
+                            final int liveW = liveClamp[0];
+                            final int liveH = liveClamp[1];
+                            lastStrokeLeft   = Math.max(0,     box.left);
+                            lastStrokeTop    = Math.max(0,     box.top);
+                            lastStrokeRight  = Math.min(liveW, box.right);
+                            lastStrokeBottom = Math.min(liveH, box.bottom);
+                            Log.d(TAG, "stroke bounds=[" + (int)lastStrokeLeft + ","
+                                + (int)lastStrokeTop + " → " + (int)lastStrokeRight
+                                + "," + (int)lastStrokeBottom + "] live=" + liveW + "x" + liveH);
                             strokeView.triggerConfirm();
                         } else {
                             strokeView.clearStroke();
@@ -644,8 +674,13 @@ public class FloatingTranslatorService extends Service {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         strokeOverlayView = root;
 
+        // [FIX-C] Use live screen size — SW/SH are stale in landscape apps
+        final int[] liveStroke = liveScreenSize();
+        Log.d(TAG, "strokeOverlay live=" + liveStroke[0] + "x" + liveStroke[1]
+            + " stored=" + SW + "x" + SH);
+
         strokeLP = new WindowManager.LayoutParams(
-            SW, SH, overlayType(),
+            liveStroke[0], liveStroke[1], overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -796,52 +831,29 @@ public class FloatingTranslatorService extends Service {
         safeSubmit(() -> {
             if (destroyed) { ocrBusy.set(false); return; }
 
+            // ── [FIX-B] Resolve live screen size on worker thread ─────
+            // SW/SH are stale after orientation changes; read live values here.
+            final int[] live = liveScreenSize();
+            final int liveW  = live[0];
+            final int liveH  = live[1];
+            Log.d(TAG, "OCR live=" + liveW + "x" + liveH
+                + " stored=" + SW + "x" + SH
+                + (liveW != SW || liveH != SH ? " *** ORIENTATION CHANGE" : ""));
+
             // ── Capture full frame ────────────────────────────────────
-            captureEngine.acquireFrame(SW, SH, density, new CaptureEngine.FrameCallback() {
+            captureEngine.acquireFrame(liveW, liveH, density, new CaptureEngine.FrameCallback() {
 
                 @Override
                 public void onFrame(Bitmap fullBmp) {
                     H.post(FloatingTranslatorService.this::exitSelectionMode);
 
                     int bW = fullBmp.getWidth(), bH = fullBmp.getHeight();
-
-                    // ── Dimension diagnostic ──────────────────────────
-                    // This block tells us immediately if there's a scaling mismatch.
-                    // Screen coords (SW×SH) must match the bitmap space for the
-                    // crop to land on the correct region.
-                    float scaleX = (bW != SW && SW > 0) ? (float) bW / SW : 1f;
-                    float scaleY = (bH != SH && SH > 0) ? (float) bH / SH : 1f;
-                    boolean hasMismatch = (bW != SW || bH != SH);
-
-                    Log.d(TAG, "─── DIMENSION CHECK ───────────────────────────");
-                    Log.d(TAG, "  screen  : " + SW + " × " + SH);
-                    Log.d(TAG, "  bitmap  : " + bW + " × " + bH);
-                    Log.d(TAG, "  density : " + density + " dpi");
-                    Log.d(TAG, "  scaleX  : " + scaleX + "  scaleY: " + scaleY);
-                    Log.d(TAG, "  mismatch: " + hasMismatch);
-                    Log.d(TAG, "  stroke (screen-space): L=" + (int)sL + " T=" + (int)sT
-                            + " R=" + (int)sR + " B=" + (int)sB);
-
-                    // ── Scale stroke coords to bitmap space ───────────
-                    // getRawX()/getRawY() are in screen-display pixels (same space as SW/SH).
-                    // If the captured bitmap is a different size, we must map them.
-                    float mappedL = sL * scaleX;
-                    float mappedT = sT * scaleY;
-                    float mappedR = sR * scaleX;
-                    float mappedB = sB * scaleY;
-
-                    Log.d(TAG, "  stroke (bitmap-space) : L=" + (int)mappedL + " T=" + (int)mappedT
-                            + " R=" + (int)mappedR + " B=" + (int)mappedB);
-                    Log.d(TAG, "───────────────────────────────────────────────");
-
-                    // Use scaled coords when there is a size mismatch;
-                    // fall back to original coords when sizes match (no-op).
-                    float csL = hasMismatch ? mappedL : sL;
-                    float csT = hasMismatch ? mappedT : sT;
-                    float csR = hasMismatch ? mappedR : sR;
-                    float csB = hasMismatch ? mappedB : sB;
-
-                    int[] crop = CaptureEngine.computeCrop(csL, csT, csR, csB, bW, bH, bW, bH,
+                    Log.d(TAG, "BITMAP bmpW=" + bW + " bmpH=" + bH
+                        + " liveW=" + liveW + " liveH=" + liveH
+                        + " scaleX=" + String.format("%.4f", (liveW > 0 ? (float)bW/liveW : 1f))
+                        + " scaleY=" + String.format("%.4f", (liveH > 0 ? (float)bH/liveH : 1f)));
+                    // [FIX-B] Use liveW/liveH — NOT SW/SH — for correct crop mapping
+                    int[] crop = CaptureEngine.computeCrop(sL, sT, sR, sB, bW, bH, liveW, liveH,
                         MIN_CROP_W, MIN_CROP_H);
 
                     if (crop == null) {
