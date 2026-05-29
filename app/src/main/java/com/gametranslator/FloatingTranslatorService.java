@@ -119,7 +119,7 @@ public class FloatingTranslatorService extends Service {
     private static final int CACHE_SIZE = 60;
 
     // Debug: set true to save cropped bitmap for inspection
-    private static final boolean DEBUG_CROP = false;
+    private static final boolean DEBUG_CROP = true;  // TODO: set false before release
 
     // ── Supported languages ───────────────────────────────────────────
     private static final String[][] LANGS = {
@@ -804,7 +804,44 @@ public class FloatingTranslatorService extends Service {
                     H.post(FloatingTranslatorService.this::exitSelectionMode);
 
                     int bW = fullBmp.getWidth(), bH = fullBmp.getHeight();
-                    int[] crop = CaptureEngine.computeCrop(sL, sT, sR, sB, bW, bH, SW, SH,
+
+                    // ── Dimension diagnostic ──────────────────────────
+                    // This block tells us immediately if there's a scaling mismatch.
+                    // Screen coords (SW×SH) must match the bitmap space for the
+                    // crop to land on the correct region.
+                    float scaleX = (bW != SW && SW > 0) ? (float) bW / SW : 1f;
+                    float scaleY = (bH != SH && SH > 0) ? (float) bH / SH : 1f;
+                    boolean hasMismatch = (bW != SW || bH != SH);
+
+                    Log.d(TAG, "─── DIMENSION CHECK ───────────────────────────");
+                    Log.d(TAG, "  screen  : " + SW + " × " + SH);
+                    Log.d(TAG, "  bitmap  : " + bW + " × " + bH);
+                    Log.d(TAG, "  density : " + density + " dpi");
+                    Log.d(TAG, "  scaleX  : " + scaleX + "  scaleY: " + scaleY);
+                    Log.d(TAG, "  mismatch: " + hasMismatch);
+                    Log.d(TAG, "  stroke (screen-space): L=" + (int)sL + " T=" + (int)sT
+                            + " R=" + (int)sR + " B=" + (int)sB);
+
+                    // ── Scale stroke coords to bitmap space ───────────
+                    // getRawX()/getRawY() are in screen-display pixels (same space as SW/SH).
+                    // If the captured bitmap is a different size, we must map them.
+                    float mappedL = sL * scaleX;
+                    float mappedT = sT * scaleY;
+                    float mappedR = sR * scaleX;
+                    float mappedB = sB * scaleY;
+
+                    Log.d(TAG, "  stroke (bitmap-space) : L=" + (int)mappedL + " T=" + (int)mappedT
+                            + " R=" + (int)mappedR + " B=" + (int)mappedB);
+                    Log.d(TAG, "───────────────────────────────────────────────");
+
+                    // Use scaled coords when there is a size mismatch;
+                    // fall back to original coords when sizes match (no-op).
+                    float csL = hasMismatch ? mappedL : sL;
+                    float csT = hasMismatch ? mappedT : sT;
+                    float csR = hasMismatch ? mappedR : sR;
+                    float csB = hasMismatch ? mappedB : sB;
+
+                    int[] crop = CaptureEngine.computeCrop(csL, csT, csR, csB, bW, bH, bW, bH,
                         MIN_CROP_W, MIN_CROP_H);
 
                     if (crop == null) {
