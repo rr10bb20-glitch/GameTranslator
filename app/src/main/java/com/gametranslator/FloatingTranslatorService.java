@@ -15,20 +15,12 @@ import android.graphics.Bitmap;
 import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.ColorMatrix;
-import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -67,7 +59,6 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -79,72 +70,58 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * FloatingTranslatorService — v22 (Game OCR + Failover Engine)
+ * FloatingTranslatorService — v23 (Modular Refactor)
  *
- * build.gradle dependencies:
- *   implementation 'com.google.mlkit:text-recognition:16.0.1'
- *   implementation 'com.google.mlkit:text-recognition-japanese:16.0.1'
+ * What changed from v22:
+ *   • CaptureEngine     — owns all MediaProjection / VirtualDisplay / ImageReader logic.
+ *                         Fixes wide-screen and high-DPI capture bugs.
+ *   • BubbleOverlay     — owns the translation result pill window.
+ *   • BitmapPool        — reusable bitmap allocation, reduces GC spikes.
+ *   • ClipboardBridge   — debounced clipboard copy (long-press bubble copies text).
+ *   • This file now focuses solely on UI orchestration and workflow coordination.
+ *   • No static Context, no duplicate code, no pooling bugs.
  *
- * Changes from v21:
- *   • Full-resolution capture (SW×SH) — fixes blurry OCR in fullscreen games
- *   • Correct crop mapping: bitmap coords = screen coords (no half-res mismatch)
- *   • OcrEngineManager — sleep/wake failover queue (Latin → Japanese → preprocessed)
- *   • TranslationEngineManager — Google → fallback degradation with cooldown
- *   • Image preprocessing pipeline: grayscale → contrast → sharpen → threshold
- *   • Debug mode: saves cropped bitmap to getExternalFilesDir() for inspection
- *   • "Selection invalid" shown when crop is too small instead of "No text found"
- *   • Detailed logs: crop coords, bitmap size, OCR result, engine events
  * Window layers (TYPE_APPLICATION_OVERLAY):
  *   1. btnView        — language pill  (drag / double-tap = picker)
- *   2. selBtnView     — ✏️ pen button  (tap = toggle, drag = draw stroke over text)
- *   3. strokeOverlay  — FLAG_NOT_TOUCHABLE draw canvas  (no dim, no rectangle)
- *   4. bubbleView     — compact translation bubble      (positioned at stroke bounds)
+ *   2. selBtnView     — ✏️ pen button  (tap = toggle, drag = draw stroke)
+ *   3. strokeOverlay  — FLAG_NOT_TOUCHABLE canvas (no dim, no rectangle)
+ *   4. BubbleOverlay  — compact translation bubble (managed externally)
  *
  * Selection model:
- *   User drags the ✏️ button across the text they want translated.
- *   A glowing white stroke is drawn under the drag path, like a marker pen.
- *   On release the bounding box of the stroke is used as the OCR crop region.
- *   A small translation bubble appears directly above (or below) the drawn area.
- *   The game stays fully visible at all times — zero dim, zero blocking overlay.
- *
- * MediaProjection stability:
- *   The service never shows "reopen app" proactively.
- *   If the projection is lost Android-side the service silently cleans up and waits.
- *   The message is shown only when the user actively tries to start a capture.
+ *   User drags ✏️ across game text → bounding box → OCR → translation → bubble.
+ *   Long-press bubble → copies text to clipboard.
  */
 public class FloatingTranslatorService extends Service {
 
     private static final String TAG        = "GT";
-    private static final String CHANNEL_ID = "gt_v21";
+    private static final String CHANNEL_ID = "gt_v23";
     private static final int    NOTIF_ID   = 1;
 
     private static final String PREFS         = "gt_prefs";
     private static final String KEY_LANG_FROM = "lang_from";
     private static final String KEY_LANG_TO   = "lang_to";
+    private static final String KEY_BATTERY_ASKED = "battery_asked";
 
-    // Timing
-    private static final long DISMISS_MS       = 7_000;
-    private static final long LONG_PRESS_MS    = 600;
-    private static final long DOUBLE_TAP_MS    = 280;
-    private static final long CAPTURE_DELAY_MS = 550;
-    private static final long IDLE_SLEEP_MS    = 5_000;
+    // Timing constants
+    private static final long LONG_PRESS_MS  = 600;
+    private static final long DOUBLE_TAP_MS  = 280;
+    private static final long IDLE_SLEEP_MS  = 5_000;
 
-    // UI alpha
+    // UI
     private static final float ALPHA_IDLE = 0.22f;
     private static final float ALPHA_BUSY = 0.95f;
 
-    // Minimum stroke bounding box to trigger OCR
+    // OCR guards
     private static final int MIN_STROKE_PX = 30;
-
-    // Debug — set true to save cropped bitmap to external files dir for inspection
-    private static final boolean DEBUG_CROP = true;
-
-    // Minimum crop size in pixels to attempt OCR (avoids "no text" on fat-finger taps)
-    private static final int MIN_CROP_W = 20;
-    private static final int MIN_CROP_H = 10;
+    private static final int MIN_CROP_W    = 20;
+    private static final int MIN_CROP_H    = 10;
 
     private static final int CACHE_SIZE = 60;
 
+    // Debug: set true to save cropped bitmap for inspection
+    private static final boolean DEBUG_CROP = false;
+
+    // ── Supported languages ───────────────────────────────────────────
     private static final String[][] LANGS = {
         {"auto","Auto","?"},
         {"ar","Arabic","AR"},{"en","English","EN"},{"ja","Japanese","JA"},
@@ -177,79 +154,63 @@ public class FloatingTranslatorService extends Service {
         {"so","Somali","SO"},{"ht","Haitian Creole","HC"},
     };
 
-
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Fields
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
-    private WindowManager            wm;
-    private int                      SW, SH;
-    private int                      capW, capH;
+    private final Handler H = new Handler(Looper.getMainLooper());
 
-    // ── VD health tracking ────────────────────────────────────
-    private static final int  VD_NULL_FRAME_LIMIT = 3;
-    private static final long WATCHDOG_MS         = 8_000;
-    private int               vdNullFrameCount    = 0;
-    private volatile long     lastSuccessfulFrame = 0;
-    private Runnable          watchdogR;
-    private final Handler            H = new Handler(Looper.getMainLooper());
-    private ExecutorService          executor;
+    // Core modules
+    private CaptureEngine   captureEngine;
+    private BubbleOverlay   bubbleOverlay;
+    private OcrEngineManager         ocrEngineManager;
+    private TranslationEngineManager translationEngineManager;
+
+    private WindowManager     wm;
+    private int               SW, SH;
+    private ExecutorService   executor;
     private LruCache<String, String> translateCache;
-    private SharedPreferences        prefs;
-    private boolean                  isAr;
+    private SharedPreferences prefs;
+    private boolean           isAr;
 
-    // Views
+    // ── Floating UI views ─────────────────────────────────────────────
     private View     btnView;
     private View     selBtnView;
-    private View     bubbleView;
     private View     strokeOverlayView;
     private View     pickerView;
-    private WindowManager.LayoutParams btnLP, selBtnLP, bubbleLP, strokeLP;
+    private WindowManager.LayoutParams btnLP, selBtnLP, strokeLP;
     private TextView tvBtnLabel;
-    private TextView tvBubbleText;
-    private TextView tvBubbleLang;
 
-    // State
+    // ── Service state ─────────────────────────────────────────────────
     private final AtomicBoolean ocrBusy     = new AtomicBoolean(false);
     private final AtomicBoolean translating = new AtomicBoolean(false);
-    private volatile boolean    bubbleVisible = false;
-    private volatile boolean    destroyed     = false;
-    private volatile boolean    viewsAdded    = false;
+    private volatile boolean    destroyed   = false;
+    private volatile boolean    viewsAdded  = false;
     private volatile boolean    selectionMode = false;
 
-    private volatile String fromLang   = "auto";
-    private volatile String toLang     = "ar";
+    private volatile String fromLang  = "auto";
+    private volatile String toLang    = "ar";
     private String          pickerFrom = "auto";
 
-    // MediaProjection — kept alive across captures, recreated only on true loss
-    private final Object           mpLock = new Object();
-    private MediaProjection        mediaProjection;
-    private MediaProjectionManager mpManager;
-    private TextRecognizer         recognizerJa;
-    private TextRecognizer         recognizerLat;
-    private VirtualDisplay         persistentVD;
-    private ImageReader            persistentReader;
-
-    // Network
+    // ── Network ───────────────────────────────────────────────────────
     private volatile boolean                    netAvailable = true;
     private ConnectivityManager.NetworkCallback netCallback;
     private ConnectivityManager                 cm;
 
-    // Timers
-    private Runnable dismissR;
+    // ── Tap / dismiss timers ──────────────────────────────────────────
     private Runnable doubleTapCheck;
     private Runnable fadeOutR;
     private Runnable sleepR;
     private int      tapCount = 0;
 
-    // Stroke selection
+    // ── Stroke selection ──────────────────────────────────────────────
     private StrokeCanvasView strokeView;
-    private float            lastStrokeLeft, lastStrokeTop, lastStrokeRight, lastStrokeBottom;
+    private float lastStrokeLeft, lastStrokeTop, lastStrokeRight, lastStrokeBottom;
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Lifecycle
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
@@ -258,30 +219,31 @@ public class FloatingTranslatorService extends Service {
         super.onCreate();
         isAr = Locale.getDefault().getLanguage().equals("ar");
         createChannel();
-        startForeground(NOTIF_ID, null);
+        startForeground(NOTIF_ID, buildNotif());
 
-        prefs     = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        wm        = (WindowManager) getSystemService(WINDOW_SERVICE);
-        mpManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
-        fromLang  = prefs.getString(KEY_LANG_FROM, "auto");
-        toLang    = prefs.getString(KEY_LANG_TO, "ar");
+        prefs    = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        wm       = (WindowManager) getSystemService(WINDOW_SERVICE);
+        fromLang = prefs.getString(KEY_LANG_FROM, "auto");
+        toLang   = prefs.getString(KEY_LANG_TO, "ar");
 
         resolveScreenSize();
-        // Full-resolution capture — avoids blurry OCR in fullscreen games.
-        // Align to 16px boundary (GPU requirement), keep at native res.
-        capW = Math.max((SW / 16) * 16, 720);
-        capH = Math.max((SH / 16) * 16, 1280);
-        Log.d(TAG, "Screen=" + SW + "x" + SH + "  capW=" + capW + "  capH=" + capH);
 
-        initOCR();
-        rebuildExecutorIfNeeded();
-        translateCache = new LruCache<>(CACHE_SIZE);
+        // Initialize modular components
+        captureEngine            = new CaptureEngine();
+        bubbleOverlay            = new BubbleOverlay(this, SW, SH);
+        translateCache           = new LruCache<>(CACHE_SIZE);
+
+        initOcrEngines();
+        initTranslationEngines();
+        rebuildExecutor();
         startNetworkMonitor();
+
+        bubbleOverlay.attach();
+        bubbleOverlay.setOnCloseListener(this::onBubbleClosed);
 
         try {
             buildButton();
             buildSelectionButton();
-            buildBubble();
             viewsAdded = true;
             H.postDelayed(() -> {
                 if (!destroyed)
@@ -294,38 +256,45 @@ public class FloatingTranslatorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        rebuildExecutorIfNeeded();
+        rebuildExecutor();
 
         if (intent == null) {
-            // Silent START_STICKY restart — no toast.
-            // If the projection was lost the user will be notified only when they try to use OCR.
             Log.w(TAG, "START_STICKY restart — waiting for user action");
             return START_STICKY;
         }
 
+        // ── Apply lang params from MainActivity ───────────────────────
         String lf = intent.getStringExtra("lang_from");
         String lt = intent.getStringExtra("lang_to");
-        if (lf != null && !lf.isEmpty()) { fromLang = lf; prefs.edit().putString(KEY_LANG_FROM, lf).apply(); }
-        if (lt != null && !lt.isEmpty()) { toLang   = lt; prefs.edit().putString(KEY_LANG_TO,   lt).apply(); }
+        if (lf != null && !lf.isEmpty()) {
+            fromLang = lf;
+            prefs.edit().putString(KEY_LANG_FROM, lf).apply();
+        }
+        if (lt != null && !lt.isEmpty()) {
+            toLang = lt;
+            prefs.edit().putString(KEY_LANG_TO, lt).apply();
+        }
         H.post(() -> { if (!destroyed && tvBtnLabel != null) tvBtnLabel.setText(shortPair()); });
 
+        // ── Receive MediaProjection token ─────────────────────────────
+        // Always accept a fresh token — MainActivity always requests a new one.
+        // This handles Xiaomi/Honor stale token after lock screen / force-stop.
         if (intent.hasExtra("mp_result_code")) {
             int    rc   = intent.getIntExtra("mp_result_code", -1);
             Intent data = intent.getParcelableExtra("mp_data");
             if (rc == android.app.Activity.RESULT_OK && data != null) {
-                synchronized (mpLock) {
-                    if (mediaProjection != null) return START_STICKY; // already alive — do nothing
+                android.media.projection.MediaProjectionManager mpm =
+                    (android.media.projection.MediaProjectionManager)
+                        getSystemService(MEDIA_PROJECTION_SERVICE);
+                if (mpm != null) {
                     try {
-                        mediaProjection = mpManager.getMediaProjection(rc, data);
-                        mediaProjection.registerCallback(new MediaProjection.Callback() {
+                        android.media.projection.MediaProjection mp =
+                            mpm.getMediaProjection(rc, data);
+
+                        mp.registerCallback(new android.media.projection.MediaProjection.Callback() {
                             @Override public void onStop() {
                                 Log.w(TAG, "MediaProjection stopped externally");
-                                synchronized (mpLock) {
-                                    // Release capture resources bound to this projection.
-                                    // Do NOT show a toast here — the user is notified on next OCR attempt.
-                                    releasePersistentCapture();
-                                    mediaProjection = null;
-                                }
+                                captureEngine.releaseVD();
                                 ocrBusy.set(false);
                                 translating.set(false);
                                 H.post(() -> {
@@ -336,18 +305,21 @@ public class FloatingTranslatorService extends Service {
                                 });
                             }
                         }, H);
-                        Log.d(TAG, "MediaProjection ready");
+
+                        // setProjection() releases old VD internally before assigning new mp
+                        captureEngine.setProjection(mp);
+                        Log.d(TAG, "MediaProjection (re)set — fresh token");
                     } catch (Exception e) {
                         Log.e(TAG, "MediaProjection init: " + e.getMessage(), e);
-                        mediaProjection = null;
                     }
                 }
             } else {
-                H.post(() -> { if (!destroyed) toast(isAr ? "رُفضت صلاحية الشاشة" : "Screen permission denied"); });
+                H.post(() -> { if (!destroyed)
+                    toast(isAr ? "رُفضت صلاحية الشاشة" : "Screen permission denied"); });
             }
         }
-        requestBatteryOptimizationExemptionOnce();
-        startProjectionWatchdog();
+
+        requestBatteryExemptionOnce();
         return START_REDELIVER_INTENT;
     }
 
@@ -358,37 +330,41 @@ public class FloatingTranslatorService extends Service {
         super.onDestroy();
 
         H.removeCallbacksAndMessages(null);
-        stopProjectionWatchdog();
         if (executor != null && !executor.isShutdown()) executor.shutdownNow();
-        closeOCR();
-        stopNetworkMonitor();
 
-        synchronized (mpLock) {
-            releasePersistentCapture();
-            if (mediaProjection != null) {
-                try { mediaProjection.stop(); } catch (Exception ignored) {}
-                mediaProjection = null;
-            }
-        }
+        // Close OCR engines
+        if (ocrEngineManager != null) { ocrEngineManager.closeAll(); ocrEngineManager = null; }
+        translationEngineManager = null;
+
+        // Release capture resources
+        if (captureEngine != null) { captureEngine.release(); captureEngine = null; }
+
+        // Release bubble
+        if (bubbleOverlay != null) { bubbleOverlay.detach(); bubbleOverlay = null; }
+
+        // Drain bitmap pool
+        BitmapPool.drainPool();
+
+        stopNetworkMonitor();
+        ClipboardBridge.cancel();
 
         if (viewsAdded) {
             safeRemove(btnView);
             safeRemove(selBtnView);
-            safeRemove(bubbleView);
             safeRemove(strokeOverlayView);
             safeRemove(pickerView);
         }
-        btnView = selBtnView = bubbleView = strokeOverlayView = pickerView = null;
-        tvBtnLabel = tvBubbleText = tvBubbleLang = null;
+        btnView = selBtnView = strokeOverlayView = pickerView = null;
+        tvBtnLabel = null;
         strokeView = null;
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // Executor
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Executor management
+    // ═════════════════════════════════════════════════════════════════
 
-    private void rebuildExecutorIfNeeded() {
+    private void rebuildExecutor() {
         if (executor == null || executor.isShutdown()) {
             executor = Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "GT-Worker");
@@ -399,20 +375,18 @@ public class FloatingTranslatorService extends Service {
     }
 
     private void safeSubmit(Runnable task) {
-        rebuildExecutorIfNeeded();
+        rebuildExecutor();
         try { executor.submit(task); }
         catch (RejectedExecutionException e) { Log.e(TAG, "safeSubmit rejected"); }
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // Sleep / Wake — zero idle resource usage
-    // Sleeps: VirtualDisplay, ImageReader, executor thread.
-    // Stays alive: mediaProjection token, OCR handles, network callback, cache.
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Sleep / wake (idle resource management)
+    // ═════════════════════════════════════════════════════════════════
 
     private void scheduleEngineSleep() {
-        H.removeCallbacks(sleepR != null ? sleepR : () -> {});
+        cancelEngineSleep();
         sleepR = this::enterEngineSleep;
         H.postDelayed(sleepR, IDLE_SLEEP_MS);
     }
@@ -423,134 +397,22 @@ public class FloatingTranslatorService extends Service {
 
     private void enterEngineSleep() {
         if (destroyed || ocrBusy.get() || translating.get()) { scheduleEngineSleep(); return; }
-        synchronized (mpLock) { releasePersistentCapture(); }
+        // Release VD (keeps projection token alive for fast resume)
+        if (captureEngine != null) captureEngine.releaseVD();
         if (executor != null && !executor.isShutdown()) { executor.shutdown(); executor = null; }
         sleepR = null;
-        Log.d(TAG, "Engine sleeping");
+        Log.d(TAG, "engine sleeping");
     }
 
     private void wakeEngine() {
         cancelEngineSleep();
-        rebuildExecutorIfNeeded();
+        rebuildExecutor();
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // OCR
-    // ════════════════════════════════════════════════════════════════
-
-    private void initOCR() {
-        try {
-            // Legacy recognizers kept for race-mode (auto lang detection).
-            // Primary OCR now goes through OcrEngineManager with failover.
-            recognizerJa  = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
-            recognizerLat = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-        } catch (Exception e) {
-            Log.e(TAG, "OCR init legacy: " + e.getMessage());
-            recognizerJa = recognizerLat = null;
-        }
-        initOcrEngineManager();
-        initTranslationEngineManager();
-    }
-
-    private void closeOCR() {
-        try { if (recognizerJa  != null) recognizerJa.close();  } catch (Exception ignored) {}
-        try { if (recognizerLat != null) recognizerLat.close(); } catch (Exception ignored) {}
-        recognizerJa = recognizerLat = null;
-        closeOcrEngineManager();
-        // translationEngineManager has no resources to close
-        translationEngineManager = null;
-    }
-
-    /** Must be called while holding mpLock. */
-    private void releasePersistentCapture() {
-        if (persistentVD != null) {
-            try { persistentVD.release(); } catch (Exception ignored) {}
-            persistentVD = null;
-        }
-        if (persistentReader != null) {
-            try { persistentReader.close(); } catch (Exception ignored) {}
-            persistentReader = null;
-        }
-        vdNullFrameCount = 0;
-    }
-
-    private boolean isProjectionAlive() {
-        if (mediaProjection == null) return false;
-        if (persistentVD != null && lastSuccessfulFrame > 0) {
-            long age = System.currentTimeMillis() - lastSuccessfulFrame;
-            if (age > WATCHDOG_MS) {
-                Log.w(TAG, "VD watchdog: stale " + age + "ms → recreate");
-                releasePersistentCapture();
-            }
-        }
-        return true;
-    }
-
-    private void recreateVirtualDisplay(int density) {
-        releasePersistentCapture();
-        if (mediaProjection == null) return;
-        try {
-            persistentReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
-            persistentVD = mediaProjection.createVirtualDisplay(
-                "GT_CAP", capW, capH, density,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                persistentReader.getSurface(), null, null);
-            Log.d(TAG, "VD recreated " + capW + "x" + capH);
-        } catch (Exception e) {
-            Log.e(TAG, "VD recreate failed: " + e.getMessage());
-            releasePersistentCapture();
-        }
-    }
-
-    private static final String KEY_BATTERY_ASKED = "battery_asked";
-    private void requestBatteryOptimizationExemptionOnce() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
-        if (prefs.getBoolean(KEY_BATTERY_ASKED, false)) return;
-        android.os.PowerManager pm =
-            (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
-        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName())) return;
-        prefs.edit().putBoolean(KEY_BATTERY_ASKED, true).apply();
-        H.postDelayed(() -> {
-            if (destroyed) return;
-            try {
-                Intent i = new Intent(
-                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    android.net.Uri.parse("package:" + getPackageName()));
-                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(i);
-            } catch (Exception e) { Log.w(TAG, "battery exemption: " + e.getMessage()); }
-        }, 3_000);
-    }
-
-    private void startProjectionWatchdog() {
-        stopProjectionWatchdog();
-        watchdogR = new Runnable() {
-            @Override public void run() {
-                if (destroyed) return;
-                synchronized (mpLock) {
-                    if (persistentVD != null && lastSuccessfulFrame > 0) {
-                        long age = System.currentTimeMillis() - lastSuccessfulFrame;
-                        if (age > WATCHDOG_MS) {
-                            Log.w(TAG, "Watchdog: VD stale " + age + "ms");
-                            releasePersistentCapture();
-                        }
-                    }
-                }
-                H.postDelayed(this, WATCHDOG_MS);
-            }
-        };
-        H.postDelayed(watchdogR, WATCHDOG_MS);
-    }
-
-    private void stopProjectionWatchdog() {
-        if (watchdogR != null) { H.removeCallbacks(watchdogR); watchdogR = null; }
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Screen size
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private void resolveScreenSize() {
         try {
@@ -560,16 +422,17 @@ public class FloatingTranslatorService extends Service {
             } else {
                 DisplayMetrics dm = new DisplayMetrics();
                 //noinspection deprecation
-                wm.getDefaultDisplay().getMetrics(dm);
+                wm.getDefaultDisplay().getRealMetrics(dm);   // getRealMetrics > getMetrics for full panel
                 SW = dm.widthPixels; SH = dm.heightPixels;
             }
         } catch (Exception e) { SW = 1080; SH = 1920; }
+        Log.d(TAG, "screen=" + SW + "x" + SH);
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Floating language pill
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private void buildButton() {
         FrameLayout root = new FrameLayout(this);
@@ -618,9 +481,9 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // ✏️ Pen button
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private void buildSelectionButton() {
         FrameLayout root = new FrameLayout(this);
@@ -645,8 +508,7 @@ public class FloatingTranslatorService extends Service {
 
         int size = dp(42);
         selBtnLP = new WindowManager.LayoutParams(
-            size, size,
-            overlayType(),
+            size, size, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
             PixelFormat.TRANSLUCENT);
@@ -659,15 +521,14 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // ✏️ Touch — tap = toggle selection mode, drag = draw stroke
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // ✏️ Touch — tap = toggle, drag = draw stroke
+    // ═════════════════════════════════════════════════════════════════
 
     private class SelBtnTouch implements View.OnTouchListener {
         private float   rx, ry;
         private int     ix, iy;
-        private boolean dragged;
-        private boolean strokeDragging;
+        private boolean dragged, strokeDragging;
 
         @Override
         public boolean onTouch(View v, MotionEvent e) {
@@ -684,7 +545,6 @@ public class FloatingTranslatorService extends Service {
                     if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
                         dragged = true;
                         if (selectionMode && strokeView != null) {
-                            // Draw stroke mode — ✏️ button is the pen tip
                             if (!strokeDragging) {
                                 strokeDragging = true;
                                 strokeView.startStroke(e.getRawX(), e.getRawY());
@@ -692,9 +552,8 @@ public class FloatingTranslatorService extends Service {
                                 strokeView.addPoint(e.getRawX(), e.getRawY());
                             }
                         } else {
-                            // Reposition both buttons together
-                            selBtnLP.x = Math.max(0, Math.min(ix + (int) dx, SW - dp(50)));
-                            selBtnLP.y = Math.max(0, Math.min(iy + (int) dy, SH - dp(50)));
+                            selBtnLP.x = clamp(ix + (int) dx, 0, SW - dp(50));
+                            selBtnLP.y = clamp(iy + (int) dy, 0, SH - dp(50));
                             safeUpdateLayout(selBtnView, selBtnLP);
                             btnLP.x = selBtnLP.x + dp(1);
                             btnLP.y = selBtnLP.y + dp(50);
@@ -709,7 +568,6 @@ public class FloatingTranslatorService extends Service {
                         strokeView.addPoint(e.getRawX(), e.getRawY());
                         RectF box = strokeView.getBoundingBox();
                         if (box.width() > MIN_STROKE_PX && box.height() > MIN_STROKE_PX) {
-                            // Clamp to screen bounds
                             lastStrokeLeft   = Math.max(0, box.left);
                             lastStrokeTop    = Math.max(0, box.top);
                             lastStrokeRight  = Math.min(SW, box.right);
@@ -734,22 +592,18 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Selection mode
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private void enterSelectionMode() {
         if (selectionMode || destroyed) return;
-        synchronized (mpLock) {
-            if (mediaProjection == null) {
-                toast(isAr
-                    ? "افتح التطبيق لمنح صلاحية الشاشة"
-                    : "Open the app to grant screen permission");
-                return;
-            }
+        if (!captureEngine.hasProjection()) {
+            toast(isAr ? "افتح التطبيق لمنح صلاحية الشاشة" : "Open the app to grant screen permission");
+            return;
         }
         selectionMode = true;
-        if (bubbleVisible) hideBubble();
+        if (bubbleOverlay.isVisible()) bubbleOverlay.hide();
         selBtnView.animate().alpha(1f).scaleX(1.1f).scaleY(1.1f).setDuration(150).start();
         buildStrokeOverlay();
     }
@@ -768,17 +622,19 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
+    private void onBubbleClosed() {
+        if (btnView != null) btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
+        scheduleBtnFade();
+        scheduleEngineSleep();
+    }
 
-    // ════════════════════════════════════════════════════════════════
-    // Stroke overlay — full-screen, FLAG_NOT_TOUCHABLE, no dim at all
-    // ════════════════════════════════════════════════════════════════
+
+    // ═════════════════════════════════════════════════════════════════
+    // Stroke overlay — full-screen, FLAG_NOT_TOUCHABLE
+    // ═════════════════════════════════════════════════════════════════
 
     private void buildStrokeOverlay() {
-        if (strokeOverlayView != null) {
-            safeRemove(strokeOverlayView);
-            strokeOverlayView = null;
-            strokeView = null;
-        }
+        if (strokeOverlayView != null) { safeRemove(strokeOverlayView); strokeOverlayView = null; strokeView = null; }
 
         strokeView = new StrokeCanvasView(this);
 
@@ -789,12 +645,11 @@ public class FloatingTranslatorService extends Service {
         strokeOverlayView = root;
 
         strokeLP = new WindowManager.LayoutParams(
-            SW, SH,
-            overlayType(),
+            SW, SH, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE, // game keeps all input
+                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT);
         strokeLP.gravity = Gravity.TOP | Gravity.START;
 
@@ -803,44 +658,34 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // StrokeCanvasView — freeform pen stroke (no rectangle, no dim)
-    //
-    // User drags the ✏️ button across the text they want to translate.
-    // The path drawn by the button acts as the "selection stroke".
-    // A soft white glow is drawn under the stroke like a highlighter pen.
-    // On confirm a green pulse flashes over the bounding box, then OCR fires.
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // StrokeCanvasView — freeform pen stroke
+    // ═════════════════════════════════════════════════════════════════
 
     private class StrokeCanvasView extends View {
-
-        private final Path strokePath  = new Path();
-        private boolean    hasStroke   = false;
-        private boolean    confirmed   = false;
-        private float      confirmAlpha = 0f;
+        private final Path   strokePath   = new Path();
+        private boolean      hasStroke    = false;
+        private boolean      confirmed    = false;
+        private float        confirmAlpha = 0f;
 
         private float minX = Float.MAX_VALUE,  minY = Float.MAX_VALUE;
         private float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
 
-        private final RectF  boundingRect = new RectF();
-        private final Paint  strokePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint  glowPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint  confirmPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint strokePaint  = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glowPaint    = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint confirmPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         StrokeCanvasView(Context ctx) {
             super(ctx);
             setWillNotDraw(false);
-            // Software layer required for BlurMaskFilter (glow)
-            setLayerType(LAYER_TYPE_SOFTWARE, null);
+            setLayerType(LAYER_TYPE_SOFTWARE, null); // required for BlurMaskFilter
 
-            // Solid white marker stroke
             strokePaint.setStyle(Paint.Style.STROKE);
             strokePaint.setStrokeWidth(dp(5));
             strokePaint.setColor(Color.argb(225, 255, 255, 255));
             strokePaint.setStrokeCap(Paint.Cap.ROUND);
             strokePaint.setStrokeJoin(Paint.Join.ROUND);
 
-            // Soft blue glow behind the stroke
             glowPaint.setStyle(Paint.Style.STROKE);
             glowPaint.setStrokeWidth(dp(16));
             glowPaint.setColor(Color.argb(60, 180, 215, 255));
@@ -848,7 +693,6 @@ public class FloatingTranslatorService extends Service {
             glowPaint.setStrokeJoin(Paint.Join.ROUND);
             glowPaint.setMaskFilter(new BlurMaskFilter(dp(10), BlurMaskFilter.Blur.NORMAL));
 
-            // Green bounding-box flash on confirm
             confirmPaint.setStyle(Paint.Style.STROKE);
             confirmPaint.setStrokeWidth(dp(2));
             confirmPaint.setColor(Color.argb(255, 80, 220, 120));
@@ -857,41 +701,32 @@ public class FloatingTranslatorService extends Service {
         void startStroke(float x, float y) {
             strokePath.reset();
             strokePath.moveTo(x, y);
-            hasStroke  = true;
-            confirmed  = false;
-            confirmAlpha = 0f;
-            minX = maxX = x;
-            minY = maxY = y;
+            hasStroke = true; confirmed = false; confirmAlpha = 0f;
+            minX = maxX = x; minY = maxY = y;
             invalidate();
         }
 
         void addPoint(float x, float y) {
             if (!hasStroke) { startStroke(x, y); return; }
             strokePath.lineTo(x, y);
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (x > maxX) maxX = x;
-            if (y > maxY) maxY = y;
+            if (x < minX) minX = x; if (y < minY) minY = y;
+            if (x > maxX) maxX = x; if (y > maxY) maxY = y;
             invalidate();
         }
 
         void clearStroke() {
-            strokePath.reset();
-            hasStroke    = false;
-            confirmed    = false;
-            confirmAlpha = 0f;
-            minX = minY = Float.MAX_VALUE;
-            maxX = maxY = -Float.MAX_VALUE;
+            strokePath.reset(); hasStroke = false; confirmed = false; confirmAlpha = 0f;
+            minX = minY = Float.MAX_VALUE; maxX = maxY = -Float.MAX_VALUE;
             invalidate();
         }
 
-        /** Bounding box of the stroke with padding for OCR crop accuracy. */
+        /** Bounding box with padding for OCR accuracy */
         RectF getBoundingBox() {
             float pad = dp(14);
             return new RectF(minX - pad, minY - pad, maxX + pad, maxY + pad);
         }
 
-        /** Flash green bounding box then fire OCR. */
+        /** Green flash animation then OCR */
         void triggerConfirm() {
             confirmed = true;
             ValueAnimator a = ValueAnimator.ofFloat(0f, 1f, 0.6f, 0f);
@@ -923,437 +758,140 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // OCR on stroke bounding box
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // OCR pipeline
+    // ═════════════════════════════════════════════════════════════════
 
-    private void runOCROnSelection(float screenLeft, float screenTop,
-                                   float screenRight, float screenBottom) {
+    private void runOCROnSelection(float sL, float sT, float sR, float sB) {
         wakeEngine();
         if (!ocrBusy.compareAndSet(false, true)) { exitSelectionMode(); return; }
-
-        synchronized (mpLock) {
-            if (mediaProjection == null) {
-                ocrBusy.set(false);
-                exitSelectionMode();
-                toast(isAr
-                    ? "افتح التطبيق لمنح صلاحية الشاشة"
-                    : "Open the app to grant screen permission");
-                return;
-            }
+        if (!captureEngine.hasProjection()) {
+            ocrBusy.set(false); exitSelectionMode();
+            toast(isAr ? "افتح التطبيق لمنح صلاحية الشاشة" : "Open the app to grant screen permission");
+            return;
         }
-
         if (ocrEngineManager == null) {
-            ocrBusy.set(false);
-            exitSelectionMode();
+            ocrBusy.set(false); exitSelectionMode();
             toast(isAr ? "OCR غير جاهز" : "OCR not ready");
             return;
         }
 
-        // Attempt engine recovery before each run
         ocrEngineManager.tryRecoverEngines();
 
-        Log.d(TAG, "OCR selection screen=["
-            + (int)screenLeft + "," + (int)screenTop + " → "
-            + (int)screenRight + "," + (int)screenBottom + "]"
-            + "  screenSize=" + SW + "x" + SH);
+        Log.d(TAG, "OCR start screen=[" + (int)sL + "," + (int)sT
+            + " → " + (int)sR + "," + (int)sB + "]");
 
         H.post(() -> {
             if (destroyed) return;
             if (tvBtnLabel != null) tvBtnLabel.setText("...");
             if (btnView    != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-            updateBubbleText(isAr ? "جاري القراءة…" : "Reading…", pairText(), false);
-            showBubble();
+            bubbleOverlay.update(isAr ? "جاري القراءة…" : "Reading…", pairText(), false);
+            bubbleOverlay.setStrokeBounds(sL, sT, sR, sB);
+            bubbleOverlay.show();
         });
 
         final int density = getResources().getDisplayMetrics().densityDpi;
+        final String snapFrom = fromLang;
 
         safeSubmit(() -> {
             if (destroyed) { ocrBusy.set(false); return; }
 
-            Bitmap fullBmp = null;
-            try {
-                final boolean wasAlive;
-                synchronized (mpLock) {
-                    if (mediaProjection == null) {
+            // ── Capture full frame ────────────────────────────────────
+            captureEngine.acquireFrame(SW, SH, density, new CaptureEngine.FrameCallback() {
+
+                @Override
+                public void onFrame(Bitmap fullBmp) {
+                    H.post(FloatingTranslatorService.this::exitSelectionMode);
+
+                    int bW = fullBmp.getWidth(), bH = fullBmp.getHeight();
+                    int[] crop = CaptureEngine.computeCrop(sL, sT, sR, sB, bW, bH, SW, SH,
+                        MIN_CROP_W, MIN_CROP_H);
+
+                    if (crop == null) {
+                        BitmapPool.release(fullBmp);
                         ocrBusy.set(false);
-                        H.post(() -> { if (!destroyed) { exitSelectionMode(); resetBtn(shortPair()); } });
+                        H.post(() -> { if (!destroyed) {
+                            resetBtn(shortPair());
+                            bubbleOverlay.update(
+                                isAr ? "التحديد صغير جداً" : "Selection invalid",
+                                pairText(), false);
+                            bubbleOverlay.show();
+                            bubbleOverlay.scheduleDismiss();
+                        }});
                         return;
                     }
-                    wasAlive = (persistentReader != null && persistentVD != null);
-                    if (!wasAlive) {
-                        // Full-resolution VirtualDisplay — capW==SW, capH==SH
-                        persistentReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2);
-                        persistentVD = mediaProjection.createVirtualDisplay(
-                            "GT_CAP", capW, capH, density,
-                            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                            persistentReader.getSurface(), null, null);
-                        Log.d(TAG, "VirtualDisplay created " + capW + "x" + capH + " @" + density + "dpi");
-                    }
-                }
 
-                Thread.sleep(wasAlive ? 120L : CAPTURE_DELAY_MS);
-                if (destroyed) { ocrBusy.set(false); return; }
-
-                Image img = null;
-                for (int i = 0; i < 3 && img == null; i++) {
-                    try { img = persistentReader.acquireLatestImage(); }
-                    catch (Exception e) { Log.w(TAG, "acquireLatestImage #" + i + ": " + e.getMessage()); }
-                    if (img == null && i < 2)
-                        try { Thread.sleep(80); } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt(); break;
-                        }
-                }
-
-                // Null frame recovery — VD surface stolen by fullscreen game
-                if (img == null) {
-                    vdNullFrameCount++;
-                    if (vdNullFrameCount >= VD_NULL_FRAME_LIMIT) {
-                        Log.w(TAG, "VD stale (" + vdNullFrameCount + " nulls) — recreating");
-                        synchronized (mpLock) { recreateVirtualDisplay(density); }
-                        Thread.sleep(CAPTURE_DELAY_MS);
-                        if (persistentReader != null) {
-                            try { img = persistentReader.acquireLatestImage(); }
-                            catch (Exception e) { Log.w(TAG, "post-recreate: " + e.getMessage()); }
-                        }
-                    }
-                } else {
-                    vdNullFrameCount = 0;
-                    lastSuccessfulFrame = System.currentTimeMillis();
-                }
-
-                if (img != null) {
+                    // Crop the selection region
+                    Bitmap cropped;
                     try {
-                        Image.Plane[] planes = img.getPlanes();
-                        ByteBuffer buf   = planes[0].getBuffer();
-                        int rStride      = planes[0].getRowStride();
-                        int pStride      = planes[0].getPixelStride();
-                        // Actual bitmap width can differ from capW due to GPU row padding
-                        int bmpW         = rStride / pStride;
-                        int usedW        = Math.min(capW, bmpW);
-
-                        Log.d(TAG, "Bitmap from ImageReader: bmpW=" + bmpW
-                            + " capW=" + capW + " capH=" + capH + " rStride=" + rStride);
-
-                        Bitmap tmp = Bitmap.createBitmap(bmpW, capH, Bitmap.Config.ARGB_8888);
-                        tmp.copyPixelsFromBuffer(buf);
-                        fullBmp = (bmpW > usedW)
-                            ? Bitmap.createBitmap(tmp, 0, 0, usedW, capH)
-                            : tmp;
-                        if (fullBmp != tmp) tmp.recycle();
-
+                        cropped = Bitmap.createBitmap(fullBmp, crop[0], crop[1], crop[2], crop[3]);
                     } catch (OutOfMemoryError | Exception e) {
-                        Log.e(TAG, "Bitmap copy: " + e.getMessage());
-                    } finally {
-                        try { img.close(); } catch (Exception ignored) {}
+                        Log.e(TAG, "crop OOM: " + e.getMessage());
+                        BitmapPool.release(fullBmp);
+                        ocrBusy.set(false);
+                        H.post(() -> { if (!destroyed) { resetBtn(shortPair()); bubbleOverlay.scheduleDismiss(); } });
+                        return;
                     }
+                    BitmapPool.release(fullBmp);  // full bitmap no longer needed
+
+                    saveDebugCrop(cropped);
+
+                    // ── OCR with failover ─────────────────────────────
+                    ocrEngineManager.runOcr(cropped, snapFrom, new OcrEngineManager.OcrCallback() {
+                        @Override public void onSuccess(String text) {
+                            BitmapPool.recycleSafe(cropped);
+                            ocrBusy.set(false);
+                            Log.d(TAG, "OCR: [" + text + "]");
+                            H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
+                            if (!text.isEmpty()) doTranslate(text);
+                            else H.post(() -> { if (!destroyed) onNoTextFound(); });
+                        }
+                        @Override public void onFailure(String reason) {
+                            BitmapPool.recycleSafe(cropped);
+                            ocrBusy.set(false);
+                            Log.e(TAG, "OCR failed: " + reason);
+                            H.post(() -> { if (!destroyed) { resetBtn(shortPair()); onNoTextFound(); } });
+                        }
+                    });
                 }
 
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                ocrBusy.set(false);
-                H.post(() -> { if (!destroyed) { exitSelectionMode(); resetBtn(shortPair()); } });
-                return;
-            } catch (Exception e) {
-                Log.e(TAG, "Capture: " + e.getMessage(), e);
-            }
-
-            H.post(this::exitSelectionMode);
-
-            if (fullBmp == null) {
-                ocrBusy.set(false);
-                H.post(() -> { if (!destroyed) {
-                    resetBtn(shortPair());
-                    updateBubbleText(isAr ? "فشل الالتقاط — حاول مجدداً" : "Capture failed — try again",
-                        pairText(), false);
-                    scheduleDismiss();
-                }});
-                return;
-            }
-
-            // ── Crop mapping ────────────────────────────────────────────
-            // VirtualDisplay is created at capW×capH == SW×SH (full res).
-            // scaleX/Y should be ~1.0. We still compute them correctly in
-            // case GPU padding made bmpW slightly wider than capW.
-            int bmpActualW = fullBmp.getWidth();
-            int bmpActualH = fullBmp.getHeight();
-
-            // scaleX = bmpActualW / SW  (should be 1.0 at full res)
-            float scaleX = (float) bmpActualW / SW;
-            float scaleY = (float) bmpActualH / SH;
-
-            int cropL = clamp((int)(screenLeft   * scaleX), 0, bmpActualW - 1);
-            int cropT = clamp((int)(screenTop    * scaleY), 0, bmpActualH - 1);
-            int cropR = clamp((int)(screenRight  * scaleX), cropL + 1, bmpActualW);
-            int cropB = clamp((int)(screenBottom * scaleY), cropT + 1, bmpActualH);
-            int cropW = cropR - cropL;
-            int cropH = cropB - cropT;
-
-            Log.d(TAG, "Crop mapping: scale=(" + scaleX + "," + scaleY + ")"
-                + "  cropRect=[" + cropL + "," + cropT + " " + cropW + "x" + cropH + "]"
-                + "  bitmapSize=" + bmpActualW + "x" + bmpActualH);
-
-            // Guard: reject tiny crops before wasting OCR time
-            if (cropW < MIN_CROP_W || cropH < MIN_CROP_H) {
-                Log.w(TAG, "Crop too small (" + cropW + "x" + cropH + ") — invalid selection");
-                recycleSafe(fullBmp);
-                ocrBusy.set(false);
-                H.post(() -> { if (!destroyed) {
-                    resetBtn(shortPair());
-                    updateBubbleText(
-                        isAr ? "التحديد صغير جداً" : "Selection invalid",
-                        pairText(), false);
-                    showBubble();
-                    scheduleDismiss();
-                }});
-                return;
-            }
-
-            final Bitmap fFull = fullBmp;
-            Bitmap cropped;
-            try {
-                cropped = Bitmap.createBitmap(fFull, cropL, cropT, cropW, cropH);
-            } catch (OutOfMemoryError | Exception e) {
-                Log.e(TAG, "Crop OOM: " + e.getMessage());
-                recycleSafe(fFull);
-                ocrBusy.set(false);
-                H.post(() -> { if (!destroyed) { resetBtn(shortPair()); scheduleDismiss(); } });
-                return;
-            }
-            recycleSafe(fFull);
-
-            // Save debug crop for inspection
-            saveDebugCrop(cropped);
-
-            final Bitmap fCropped = cropped;
-            final String snapFrom = fromLang;
-
-            // ── OCR via EngineManager with failover ──────────────────────
-            ocrEngineManager.runOcr(fCropped, snapFrom, new OcrEngineManager.OcrCallback() {
-                @Override public void onSuccess(String text) {
-                    recycleSafe(fCropped);
-                    Runtime.getRuntime().gc();
+                @Override
+                public void onError(String reason) {
                     ocrBusy.set(false);
-                    Log.d(TAG, "OCR result: [" + text + "]");
-                    H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
-                    if (!text.isEmpty()) {
-                        doTranslate(text);
-                    } else {
-                        H.post(() -> { if (!destroyed) onNoTextFound(); });
-                    }
-                }
-                @Override public void onFailure(String reason) {
-                    recycleSafe(fCropped);
-                    Runtime.getRuntime().gc();
-                    ocrBusy.set(false);
-                    Log.e(TAG, "OCR all engines failed: " + reason);
+                    Log.e(TAG, "capture error: " + reason);
                     H.post(() -> { if (!destroyed) {
+                        exitSelectionMode();
                         resetBtn(shortPair());
-                        onNoTextFound();
+                        bubbleOverlay.update(
+                            isAr ? "فشل الالتقاط — حاول مجدداً" : "Capture failed — try again",
+                            pairText(), false);
+                        bubbleOverlay.show();
+                        bubbleOverlay.scheduleDismiss();
                     }});
                 }
             });
         });
     }
 
-    /** Returns true if string contains at least one CJK/Hangul/Kana character. */
-    private boolean containsCJK(String s) {
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if ((c >= 0x3000 && c <= 0x9FFF) || (c >= 0xAC00 && c <= 0xD7FF)
-                || (c >= 0xF900 && c <= 0xFAFF)) return true;
-        }
-        return false;
-    }
-
-    private int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
-
     private void onNoTextFound() {
         resetBtn(shortPair());
-        updateBubbleText(isAr ? "لا يوجد نص في هذه المنطقة" : "No text found", pairText(), false);
-        showBubble();
-        scheduleDismiss();
+        bubbleOverlay.update(isAr ? "لا يوجد نص في هذه المنطقة" : "No text found", pairText(), false);
+        bubbleOverlay.show();
+        bubbleOverlay.scheduleDismiss();
         scheduleEngineSleep();
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // Compact translation bubble
-    // Small pill positioned directly above (or below) the stroke area.
-    // No full-screen card, no dim, no ScrollView inside result.
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Translation pipeline
+    // ═════════════════════════════════════════════════════════════════
 
-    private void buildBubble() {
-        LinearLayout pill = new LinearLayout(this);
-        pill.setOrientation(LinearLayout.VERTICAL);
-        pill.setPadding(dp(11), dp(6), dp(11), dp(9));
-
-        GradientDrawable bg = new GradientDrawable();
-        bg.setShape(GradientDrawable.RECTANGLE);
-        bg.setColor(Color.argb(210, 4, 10, 26));
-        bg.setCornerRadius(dp(10));
-        bg.setStroke(dp(1), Color.argb(140, 55, 130, 255));
-        pill.setBackground(bg);
-        pill.setElevation(dp(8));
-
-        // Header: lang label + close ×
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-
-        tvBubbleLang = new TextView(this);
-        tvBubbleLang.setText(pairText());
-        tvBubbleLang.setTextColor(Color.argb(170, 80, 150, 255));
-        tvBubbleLang.setTextSize(8f);
-        tvBubbleLang.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(tvBubbleLang, new LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-
-        TextView xBtn = new TextView(this);
-        xBtn.setText(" ×");
-        xBtn.setTextColor(Color.argb(200, 220, 80, 80));
-        xBtn.setTextSize(13f);
-        xBtn.setClickable(true);
-        xBtn.setFocusable(true);
-        xBtn.setOnClickListener(v -> hideBubble());
-        header.addView(xBtn);
-        pill.addView(header);
-
-        View divider = new View(this);
-        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
-        divLp.setMargins(0, dp(2), 0, dp(4));
-        divider.setBackgroundColor(Color.argb(50, 55, 120, 220));
-        pill.addView(divider, divLp);
-
-        // Translation text
-        tvBubbleText = new TextView(this);
-        tvBubbleText.setTextColor(Color.argb(250, 225, 240, 255));
-        tvBubbleText.setTextSize(14f);
-        tvBubbleText.setTypeface(Typeface.DEFAULT_BOLD);
-        tvBubbleText.setLineSpacing(dp(1), 1.1f);
-        tvBubbleText.setMaxLines(5);
-        tvBubbleText.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        pill.addView(tvBubbleText);
-
-        bubbleView = pill;
-        bubbleView.setAlpha(0f);
-
-        bubbleLP = new WindowManager.LayoutParams(
-            (int)(SW * 0.72f),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT);
-        bubbleLP.gravity = Gravity.TOP | Gravity.START;
-        bubbleLP.x = dp(8);
-        bubbleLP.y = dp(8);
-
-        safeAddView(bubbleView, bubbleLP);
-    }
-
-    private void positionBubble() {
-        if (bubbleView == null || bubbleLP == null) return;
-        if (lastStrokeRight <= lastStrokeLeft || lastStrokeBottom <= lastStrokeTop) return;
-        int  w       = bubbleLP.width;
-        int  margin  = dp(8);
-        int  x       = (int)((lastStrokeLeft + lastStrokeRight) / 2f) - w / 2;
-        x = Math.max(margin, Math.min(x, SW - w - margin));
-        int  pillH   = dp(84);
-        int  y       = (lastStrokeTop > pillH + margin * 2)
-            ? (int) lastStrokeTop - pillH - margin
-            : (int) lastStrokeBottom + margin;
-        y = Math.max(dp(4), Math.min(y, SH - pillH - dp(4)));
-        bubbleLP.x = x;
-        bubbleLP.y = y;
-        safeUpdateLayout(bubbleView, bubbleLP);
-    }
-
-    private void updateBubbleText(String text, String langLabel, boolean isResult) {
-        if (tvBubbleText == null) return;
-        tvBubbleText.setText(text);
-        tvBubbleText.setTextColor(isResult
-            ? Color.argb(250, 225, 240, 255)
-            : Color.argb(150, 130, 165, 220));
-        if (tvBubbleLang != null) tvBubbleLang.setText(langLabel);
-    }
-
-    private static final int FLAGS_BUBBLE_VISIBLE =
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-
-    private static final int FLAGS_BUBBLE_HIDDEN =
-        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-            | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
-            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-
-    private void showBubble() {
-        if (destroyed || bubbleView == null) return;
-        bubbleVisible = true;
-        bubbleLP.flags = FLAGS_BUBBLE_VISIBLE;
-        positionBubble();
-        safeUpdateLayout(bubbleView, bubbleLP);
-        bubbleView.animate().cancel();
-        bubbleView.animate().alpha(1f).setDuration(200).start();
-    }
-
-    private void hideBubble() {
-        cancelDismiss();
-        if (destroyed || bubbleView == null || !bubbleVisible) return;
-        bubbleVisible = false;
-        bubbleView.animate().cancel();
-        bubbleView.animate().alpha(0f).setDuration(200).withEndAction(() -> {
-            if (destroyed) return;
-            bubbleLP.flags = FLAGS_BUBBLE_HIDDEN;
-            safeUpdateLayout(bubbleView, bubbleLP);
-            scheduleEngineSleep();
-        }).start();
-        if (btnView != null) btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
-        scheduleBtnFade();
-    }
-
-    private void scheduleDismiss() {
-        cancelDismiss();
-        dismissR = this::hideBubble;
-        H.postDelayed(dismissR, DISMISS_MS);
-    }
-
-    private void cancelDismiss() {
-        if (dismissR != null) { H.removeCallbacks(dismissR); dismissR = null; }
-    }
-
-    private void scheduleBtnFade() {
-        if (fadeOutR != null) H.removeCallbacks(fadeOutR);
-        fadeOutR = () -> {
-            if (!ocrBusy.get() && !translating.get() && !bubbleVisible && !selectionMode && btnView != null)
-                btnView.animate().alpha(ALPHA_IDLE).setDuration(800).start();
-        };
-        H.postDelayed(fadeOutR, 3_000);
-    }
-
-    private void resetBtn(String label) {
-        if (destroyed || tvBtnLabel == null || btnView == null) return;
-        tvBtnLabel.setText(label);
-        btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
-        scheduleBtnFade();
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // Translation engine
-    // Priority: 1. online (Google Translate)  2. degrade (show original)
-    // ════════════════════════════════════════════════════════════════
-
-    private void doTranslate(final String text) {
+    private void doTranslate(String text) {
         if (!translating.compareAndSet(false, true)) return;
         cancelEngineSleep();
-        cancelDismiss();
+        bubbleOverlay.cancelDismiss();
 
+        // Cache check
         String cacheKey = fromLang + "|" + toLang + "|" + text;
         String cached   = translateCache.get(cacheKey);
         if (cached != null) {
@@ -1366,26 +904,25 @@ public class FloatingTranslatorService extends Service {
             if (destroyed) return;
             if (tvBtnLabel != null) tvBtnLabel.setText("...");
             if (btnView    != null) btnView.animate().alpha(ALPHA_BUSY).setDuration(100).start();
-            updateBubbleText(isAr ? "جاري الترجمة…" : "Translating…", pairText(), false);
-            showBubble();
+            bubbleOverlay.update(isAr ? "جاري الترجمة…" : "Translating…", pairText(), false);
+            bubbleOverlay.show();
         });
 
-        final String input;
-        if (text.length() > 600) {
-            int cp = text.codePointCount(0, text.length());
-            input  = text.substring(0, text.offsetByCodePoints(0, Math.min(600, cp)));
-        } else {
-            input = text;
-        }
+        // Truncate very long strings to prevent timeout
+        String input = text.length() > 600
+            ? text.substring(0, text.offsetByCodePoints(0,
+                Math.min(600, text.codePointCount(0, text.length()))))
+            : text;
+
         final String snapFrom = fromLang, snapTo = toLang, key = cacheKey;
 
         if (translationEngineManager == null) {
             translating.set(false);
             H.post(() -> { if (!destroyed) {
                 resetBtn(shortPair());
-                updateBubbleText(text, "⚠ " + pairText(), false);
-                showBubble();
-                scheduleDismiss();
+                bubbleOverlay.update(text, "⚠ " + pairText(), false);
+                bubbleOverlay.show();
+                bubbleOverlay.scheduleDismiss();
                 scheduleEngineSleep();
             }});
             return;
@@ -1395,25 +932,23 @@ public class FloatingTranslatorService extends Service {
             new TranslationEngineManager.TranslationCallback() {
                 @Override public void onSuccess(String result, String engineName) {
                     translating.set(false);
-                    String modeTag = engineName.contains("Passthrough") ? "⚠offline" : "☁";
+                    String tag = engineName.contains("Passthrough") ? "⚠offline" : "☁";
                     H.post(() -> {
                         if (destroyed) return;
                         translateCache.put(key, result);
-                        showResult(text, result, modeTag);
+                        showResult(text, result, tag);
                     });
                 }
                 @Override public void onFailure(String reason) {
                     translating.set(false);
-                    Log.e(TAG, "All translation engines failed: " + reason);
-                    H.post(() -> {
-                        if (destroyed) return;
-                        // Graceful degrade — show original OCR text
+                    Log.e(TAG, "translate all failed: " + reason);
+                    H.post(() -> { if (!destroyed) {
                         resetBtn(shortPair());
-                        updateBubbleText(text, "⚠ " + pairText(), false);
-                        showBubble();
-                        scheduleDismiss();
+                        bubbleOverlay.update(text, "⚠ " + pairText(), false);
+                        bubbleOverlay.show();
+                        bubbleOverlay.scheduleDismiss();
                         scheduleEngineSleep();
-                    });
+                    }});
                 }
             });
     }
@@ -1421,17 +956,17 @@ public class FloatingTranslatorService extends Service {
     private void showResult(String original, String translated, String modeTag) {
         if (destroyed) return;
         String label = pairText() + (modeTag.isEmpty() ? "" : "  " + modeTag);
-        updateBubbleText(translated, label, true);
+        bubbleOverlay.update(translated, label, true);
         resetBtn(shortPair());
-        showBubble();
-        scheduleDismiss();
+        bubbleOverlay.show();
+        bubbleOverlay.scheduleDismiss();
         scheduleEngineSleep();
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // Main button touch — drag / single-tap / double-tap / long-press
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Main button touch — drag / single / double-tap / long-press
+    // ═════════════════════════════════════════════════════════════════
 
     private class BtnTouch implements View.OnTouchListener {
         private int     ix, iy;
@@ -1454,8 +989,8 @@ public class FloatingTranslatorService extends Service {
                     float dx = e.getRawX() - rx, dy = e.getRawY() - ry;
                     if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
                         dragged = true;
-                        btnLP.x = Math.max(0, Math.min(ix + (int) dx, SW - dp(68)));
-                        btnLP.y = Math.max(0, Math.min(iy + (int) dy, SH - dp(40)));
+                        btnLP.x = clamp(ix + (int) dx, 0, SW - dp(68));
+                        btnLP.y = clamp(iy + (int) dy, 0, SH - dp(40));
                         safeUpdateLayout(btnView, btnLP);
                         selBtnLP.x = btnLP.x + dp(1);
                         selBtnLP.y = btnLP.y - dp(50);
@@ -1467,7 +1002,7 @@ public class FloatingTranslatorService extends Service {
                     if (!dragged) {
                         long held = System.currentTimeMillis() - downAt;
                         if (held >= LONG_PRESS_MS) {
-                            if (bubbleVisible) hideBubble();
+                            if (bubbleOverlay.isVisible()) bubbleOverlay.hide();
                             openPicker();
                         } else {
                             tapCount++;
@@ -1492,20 +1027,20 @@ public class FloatingTranslatorService extends Service {
     private void onSingleTap() {
         if (pickerView    != null) { closePicker(); scheduleBtnFade(); return; }
         if (selectionMode)         { exitSelectionMode(); return; }
-        if (bubbleVisible)         { hideBubble(); return; }
+        if (bubbleOverlay.isVisible()) { bubbleOverlay.hide(); return; }
         toast(isAr ? "استخدم ✏️ للرسم فوق النص" : "Draw with ✏️ over text");
         scheduleBtnFade();
     }
 
     private void onDoubleTap() {
-        if (bubbleVisible) hideBubble();
+        if (bubbleOverlay.isVisible()) bubbleOverlay.hide();
         openPicker();
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Language picker
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     interface LangCb { void pick(String code); }
 
@@ -1517,8 +1052,8 @@ public class FloatingTranslatorService extends Service {
                 fromLang = pickerFrom;
                 toLang   = code2;
                 prefs.edit().putString(KEY_LANG_FROM, fromLang).putString(KEY_LANG_TO, toLang).apply();
-                if (tvBubbleLang != null) tvBubbleLang.setText(pairText());
-                if (tvBtnLabel   != null) tvBtnLabel.setText(shortPair());
+                bubbleOverlay.setLangLabel(pairText());
+                if (tvBtnLabel != null) tvBtnLabel.setText(shortPair());
                 closePicker();
             });
         });
@@ -1537,6 +1072,7 @@ public class FloatingTranslatorService extends Service {
         root.setBackground(bg);
         root.setElevation(dp(16));
 
+        // Title row
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -1558,8 +1094,8 @@ public class FloatingTranslatorService extends Service {
         root.addView(tr);
 
         View divider = new View(this);
-        LinearLayout.LayoutParams divLp = new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
+        LinearLayout.LayoutParams divLp =
+            new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1));
         divLp.setMargins(0, 0, 0, dp(4));
         divider.setBackgroundColor(Color.argb(50, 60, 100, 200));
         root.addView(divider, divLp);
@@ -1603,14 +1139,11 @@ public class FloatingTranslatorService extends Service {
             LinearLayout.LayoutParams.MATCH_PARENT, (int)(SH * 0.48f)));
 
         pickerView = root;
-        WindowManager.LayoutParams pickerLP = new WindowManager.LayoutParams(
-            (int)(SW * 0.70f),
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            overlayType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT);
-        pickerLP.gravity = Gravity.CENTER;
-        safeAddView(pickerView, pickerLP);
+        WindowManager.LayoutParams plp = new WindowManager.LayoutParams(
+            (int)(SW * 0.70f), WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+        plp.gravity = Gravity.CENTER;
+        safeAddView(pickerView, plp);
     }
 
     private void closePicker() {
@@ -1618,10 +1151,9 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
     // Google Translate (unofficial endpoint — personal/dev use only)
-    // Replace googleTranslate() to switch to an official backend.
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private String googleTranslate(String text, String from, String to) throws Exception {
         String urlStr = "https://translate.googleapis.com/translate_a/single"
@@ -1634,7 +1166,6 @@ public class FloatingTranslatorService extends Service {
             c.setRequestProperty("User-Agent", "Mozilla/5.0");
             c.setConnectTimeout(4_000);
             c.setReadTimeout(4_000);
-            c.setRequestMethod("GET");
             if (c.getResponseCode() != 200) throw new Exception("HTTP " + c.getResponseCode());
 
             BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), "UTF-8"));
@@ -1659,9 +1190,9 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
-    // Network monitor — event-driven, zero polling cost
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Network monitor
+    // ═════════════════════════════════════════════════════════════════
 
     private void startNetworkMonitor() {
         cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
@@ -1697,9 +1228,343 @@ public class FloatingTranslatorService extends Service {
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // OCR engine manager
+    // ═════════════════════════════════════════════════════════════════
+
+    private void initOcrEngines() {
+        List<OcrEngineManager.OcrEngine> engines = new ArrayList<>();
+
+        engines.add(new OcrEngineManager.OcrEngine("Latin-Fast") {
+            private TextRecognizer rec;
+            @Override public void wake()  { if (rec == null) rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS); }
+            @Override public void sleep() { if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; } }
+            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
+                if (rec == null) { cb.onFailure("Latin rec null"); return; }
+                rec.process(InputImage.fromBitmap(bmp, 0))
+                    .addOnSuccessListener(r -> cb.onSuccess(r.getText().trim()))
+                    .addOnFailureListener(e -> cb.onFailure(e.getMessage()));
+            }
+        });
+
+        engines.add(new OcrEngineManager.OcrEngine("Japanese-CJK") {
+            private TextRecognizer rec;
+            @Override public void wake()  { if (rec == null) rec = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build()); }
+            @Override public void sleep() { if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; } }
+            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
+                if (rec == null) { cb.onFailure("JA rec null"); return; }
+                rec.process(InputImage.fromBitmap(bmp, 0))
+                    .addOnSuccessListener(r -> cb.onSuccess(r.getText().trim()))
+                    .addOnFailureListener(e -> cb.onFailure(e.getMessage()));
+            }
+        });
+
+        engines.add(new OcrEngineManager.OcrEngine("Latin-Preprocessed") {
+            private TextRecognizer rec;
+            @Override public void wake()  { if (rec == null) rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS); }
+            @Override public void sleep() { if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; } }
+            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
+                if (rec == null) { cb.onFailure("Preprocessed rec null"); return; }
+                Bitmap processed = ImagePreprocessor.process(bmp);
+                rec.process(InputImage.fromBitmap(processed, 0))
+                    .addOnSuccessListener(r -> {
+                        if (processed != bmp) BitmapPool.recycleSafe(processed);
+                        cb.onSuccess(r.getText().trim());
+                    })
+                    .addOnFailureListener(e -> {
+                        if (processed != bmp) BitmapPool.recycleSafe(processed);
+                        cb.onFailure(e.getMessage());
+                    });
+            }
+        });
+
+        engines.add(new OcrEngineManager.OcrEngine("Japanese-Preprocessed") {
+            private TextRecognizer rec;
+            @Override public void wake()  { if (rec == null) rec = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build()); }
+            @Override public void sleep() { if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; } }
+            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
+                if (rec == null) { cb.onFailure("JA-Prep rec null"); return; }
+                Bitmap processed = ImagePreprocessor.process(bmp);
+                rec.process(InputImage.fromBitmap(processed, 0))
+                    .addOnSuccessListener(r -> {
+                        if (processed != bmp) BitmapPool.recycleSafe(processed);
+                        cb.onSuccess(r.getText().trim());
+                    })
+                    .addOnFailureListener(e -> {
+                        if (processed != bmp) BitmapPool.recycleSafe(processed);
+                        cb.onFailure(e.getMessage());
+                    });
+            }
+        });
+
+        ocrEngineManager = new OcrEngineManager(engines);
+        ocrEngineManager.wakeActive();
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
+    // Translation engine manager
+    // ═════════════════════════════════════════════════════════════════
+
+    private void initTranslationEngines() {
+        List<TranslationEngineManager.TranslationEngine> engines = new ArrayList<>();
+
+        engines.add(new TranslationEngineManager.TranslationEngine("Google-Translate") {
+            @Override public String translate(String text, String from, String to) throws Exception {
+                return googleTranslate(text, from, to);
+            }
+            @Override public boolean requiresNetwork() { return true; }
+        });
+
+        engines.add(new TranslationEngineManager.TranslationEngine("Offline-Passthrough") {
+            @Override public String translate(String text, String from, String to) { return text; }
+            @Override public boolean requiresNetwork() { return false; }
+        });
+
+        translationEngineManager = new TranslationEngineManager(engines);
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
+    // OcrEngineManager (inner static — no outer class reference)
+    // ═════════════════════════════════════════════════════════════════
+
+    private static class OcrEngineManager {
+        interface OcrCallback {
+            void onSuccess(String text);
+            void onFailure(String reason);
+        }
+
+        static abstract class OcrEngine {
+            final String name;
+            boolean sleeping = true;
+            int     failCount = 0;
+            long    lastFailAt = 0;
+            static final long COOLDOWN_MS = 30_000;
+            static final int  MAX_FAILS   = 2;
+
+            OcrEngine(String name) { this.name = name; }
+            abstract void wake();
+            abstract void sleep();
+            abstract void recognize(Bitmap bmp, OcrCallback cb);
+
+            boolean isCoolingDown() {
+                return failCount >= MAX_FAILS
+                    && (System.currentTimeMillis() - lastFailAt) < COOLDOWN_MS;
+            }
+            void recordFail() { failCount++; lastFailAt = System.currentTimeMillis(); }
+            void resetFails() { failCount = 0; }
+        }
+
+        private final List<OcrEngine>     engines;
+        private final AtomicInteger       activeIdx = new AtomicInteger(0);
+
+        OcrEngineManager(List<OcrEngine> engines) { this.engines = engines; }
+
+        void wakeActive() {
+            OcrEngine e = engines.get(activeIdx.get());
+            if (e.sleeping) { e.wake(); e.sleeping = false; }
+            Log.d("GT-OCR", "wake → [" + e.name + "]");
+        }
+
+        void runOcr(Bitmap bmp, String preferLang, OcrCallback finalCb) {
+            tryEngine(bmp, preferLang, finalCb, 0);
+        }
+
+        private void tryEngine(Bitmap bmp, String preferLang, OcrCallback finalCb, int attempt) {
+            int startIdx = pickStartIdx(preferLang);
+            int idx      = (startIdx + attempt) % engines.size();
+            int skips    = 0;
+
+            while (engines.get(idx).isCoolingDown() && skips < engines.size()) {
+                idx = (idx + 1) % engines.size();
+                skips++;
+            }
+            if (skips == engines.size()) {
+                finalCb.onFailure("all_cooling"); return;
+            }
+
+            final int fIdx = idx;
+            OcrEngine eng  = engines.get(fIdx);
+            if (eng.sleeping) { eng.wake(); eng.sleeping = false; }
+            activeIdx.set(fIdx);
+            Log.d("GT-OCR", "try[" + attempt + "] engine=" + eng.name);
+
+            eng.recognize(bmp, new OcrCallback() {
+                @Override public void onSuccess(String text) {
+                    if (text.isEmpty()) {
+                        eng.recordFail();
+                        sleepEngine(fIdx);
+                        if (attempt + 1 < engines.size())
+                            tryEngine(bmp, preferLang, finalCb, attempt + 1);
+                        else
+                            finalCb.onSuccess("");
+                    } else {
+                        eng.resetFails();
+                        finalCb.onSuccess(text);
+                    }
+                }
+                @Override public void onFailure(String reason) {
+                    Log.e("GT-OCR", "[" + eng.name + "] fail: " + reason);
+                    eng.recordFail();
+                    sleepEngine(fIdx);
+                    if (attempt + 1 < engines.size())
+                        tryEngine(bmp, preferLang, finalCb, attempt + 1);
+                    else
+                        finalCb.onFailure("all_failed");
+                }
+            });
+        }
+
+        private int pickStartIdx(String lang) {
+            if (lang != null && (lang.equals("ja") || lang.equals("ko") || lang.startsWith("zh")))
+                return 1;
+            return 0;
+        }
+
+        private void sleepEngine(int idx) {
+            OcrEngine e = engines.get(idx);
+            if (!e.sleeping) { e.sleep(); e.sleeping = true; }
+        }
+
+        void tryRecoverEngines() {
+            for (OcrEngine e : engines) {
+                if (e.sleeping && !e.isCoolingDown() && e.failCount > 0) e.resetFails();
+            }
+            boolean anyAwake = false;
+            for (OcrEngine e : engines) if (!e.sleeping) { anyAwake = true; break; }
+            if (!anyAwake) wakeActive();
+        }
+
+        void closeAll() {
+            for (OcrEngine e : engines) try { e.sleep(); } catch (Exception ignored) {}
+        }
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
+    // TranslationEngineManager (inner static)
+    // ═════════════════════════════════════════════════════════════════
+
+    private static class TranslationEngineManager {
+        interface TranslationCallback {
+            void onSuccess(String result, String engineName);
+            void onFailure(String reason);
+        }
+
+        static abstract class TranslationEngine {
+            final String name;
+            int  failCount = 0;
+            long lastFailAt = 0;
+            static final long COOLDOWN_MS = 60_000;
+            static final int  MAX_FAILS   = 2;
+
+            TranslationEngine(String name) { this.name = name; }
+            abstract String translate(String text, String from, String to) throws Exception;
+            abstract boolean requiresNetwork();
+
+            boolean isCoolingDown() {
+                return failCount >= MAX_FAILS
+                    && (System.currentTimeMillis() - lastFailAt) < COOLDOWN_MS;
+            }
+            void recordFail() { failCount++; lastFailAt = System.currentTimeMillis(); }
+            void resetFails() { failCount = 0; }
+        }
+
+        private final List<TranslationEngine> engines;
+        TranslationEngineManager(List<TranslationEngine> engines) { this.engines = engines; }
+
+        void translate(String text, String from, String to, boolean netAvailable,
+                       ExecutorService exec, TranslationCallback cb) {
+            if (exec == null || exec.isShutdown()) { cb.onFailure("executor_dead"); return; }
+            exec.submit(() -> {
+                for (TranslationEngine eng : engines) {
+                    if (eng.isCoolingDown()) continue;
+                    if (eng.requiresNetwork() && !netAvailable) continue;
+                    try {
+                        String result = eng.translate(text, from, to);
+                        if (result == null || result.isEmpty()) throw new Exception("empty");
+                        eng.resetFails();
+                        cb.onSuccess(result, eng.name);
+                        return;
+                    } catch (Exception e) {
+                        Log.w("GT-Tr", "[" + eng.name + "] fail: " + e.getMessage());
+                        eng.recordFail();
+                    }
+                }
+                cb.onFailure("all_failed");
+            });
+        }
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
+    // ImagePreprocessor (inner static — no context needed)
+    // ═════════════════════════════════════════════════════════════════
+
+    static class ImagePreprocessor {
+        static Bitmap process(Bitmap src) {
+            if (src == null || src.isRecycled()) return src;
+            try {
+                // Scale up small crops for better OCR
+                Bitmap scaled = src;
+                if (src.getWidth() < 200 || src.getHeight() < 60) {
+                    float f = Math.max(200f / src.getWidth(), 60f / src.getHeight());
+                    scaled = Bitmap.createScaledBitmap(src,
+                        Math.round(src.getWidth() * f), Math.round(src.getHeight() * f), true);
+                }
+
+                // Grayscale + contrast boost
+                Bitmap gray = Bitmap.createBitmap(scaled.getWidth(), scaled.getHeight(),
+                    Bitmap.Config.ARGB_8888);
+                Canvas c = new Canvas(gray);
+                Paint  p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+
+                android.graphics.ColorMatrix cm = new android.graphics.ColorMatrix();
+                cm.setSaturation(0f);
+                float[] contrast = {
+                    1.6f,0,0,0,-80, 0,1.6f,0,0,-80, 0,0,1.6f,0,-80, 0,0,0,1,0
+                };
+                android.graphics.ColorMatrix cc = new android.graphics.ColorMatrix(contrast);
+                cm.postConcat(cc);
+                p.setColorFilter(new android.graphics.ColorMatrixColorFilter(cm));
+                c.drawBitmap(scaled, 0, 0, p);
+                if (scaled != src) scaled.recycle();
+
+                // Sharpen
+                Bitmap sharp = applySharpen(gray);
+                if (sharp != gray) gray.recycle();
+                return sharp;
+            } catch (Exception e) {
+                Log.w("GT-Prep", "preprocess failed: " + e.getMessage());
+                return src;
+            }
+        }
+
+        private static Bitmap applySharpen(Bitmap src) {
+            try {
+                Bitmap out = Bitmap.createBitmap(src.getWidth(), src.getHeight(),
+                    Bitmap.Config.ARGB_8888);
+                Canvas c = new Canvas(out);
+                c.drawBitmap(src, 0, 0, null);
+                Paint p = new Paint();
+                p.setAlpha(60);
+                android.graphics.ColorMatrix inv = new android.graphics.ColorMatrix(new float[]{
+                    -1,0,0,0,255, 0,-1,0,0,255, 0,0,-1,0,255, 0,0,0,1,0
+                });
+                p.setColorFilter(new android.graphics.ColorMatrixColorFilter(inv));
+                p.setXfermode(new android.graphics.PorterDuffXfermode(
+                    android.graphics.PorterDuff.Mode.SCREEN));
+                c.drawBitmap(src, 0, 0, p);
+                return out;
+            } catch (Exception e) { return src; }
+        }
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
     // Helpers
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private String pairText()  { return abbr(fromLang) + " → " + abbr(toLang); }
     private String shortPair() { return abbr(fromLang) + "→" + abbr(toLang); }
@@ -1740,14 +1605,66 @@ public class FloatingTranslatorService extends Service {
         try { wm.removeView(v); } catch (Exception e) { Log.e(TAG, "removeView: " + e.getMessage()); }
     }
 
-    private void recycleSafe(Bitmap bmp) {
-        if (bmp != null && !bmp.isRecycled()) try { bmp.recycle(); } catch (Exception ignored) {}
+    private static int clamp(int v, int lo, int hi) { return Math.max(lo, Math.min(hi, v)); }
+
+    private void resetBtn(String label) {
+        if (destroyed || tvBtnLabel == null || btnView == null) return;
+        tvBtnLabel.setText(label);
+        btnView.animate().alpha(ALPHA_IDLE).setDuration(300).start();
+        scheduleBtnFade();
+    }
+
+    private void scheduleBtnFade() {
+        if (fadeOutR != null) H.removeCallbacks(fadeOutR);
+        fadeOutR = () -> {
+            if (!ocrBusy.get() && !translating.get()
+                    && !bubbleOverlay.isVisible() && !selectionMode && btnView != null)
+                btnView.animate().alpha(ALPHA_IDLE).setDuration(800).start();
+        };
+        H.postDelayed(fadeOutR, 3_000);
+    }
+
+    private void requestBatteryExemptionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        if (prefs.getBoolean(KEY_BATTERY_ASKED, false)) return;
+        android.os.PowerManager pm =
+            (android.os.PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName())) return;
+        prefs.edit().putBoolean(KEY_BATTERY_ASKED, true).apply();
+        H.postDelayed(() -> {
+            if (destroyed) return;
+            try {
+                Intent i = new Intent(
+                    android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + getPackageName()));
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Exception e) { Log.w(TAG, "battery exemption: " + e.getMessage()); }
+        }, 3_000);
     }
 
 
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // Debug crop save
+    // ═════════════════════════════════════════════════════════════════
+
+    private void saveDebugCrop(Bitmap bmp) {
+        if (!DEBUG_CROP || bmp == null || bmp.isRecycled()) return;
+        try {
+            File dir = getExternalFilesDir(null);
+            if (dir == null) return;
+            File f = new File(dir, "gt_crop_" + System.currentTimeMillis() + ".png");
+            try (FileOutputStream fos = new FileOutputStream(f)) {
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
+            }
+            Log.d(TAG, "DEBUG crop → " + f.getAbsolutePath());
+        } catch (Exception e) { Log.w(TAG, "DEBUG crop save: " + e.getMessage()); }
+    }
+
+
+    // ═════════════════════════════════════════════════════════════════
     // Notification
-    // ════════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1765,10 +1682,9 @@ public class FloatingTranslatorService extends Service {
             | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pi = PendingIntent.getActivity(
             this, 0, new Intent(this, MainActivity.class), flags);
-        boolean ar = Locale.getDefault().getLanguage().equals("ar");
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(ar ? "مترجم الألعاب" : "Game Translator")
-            .setContentText(ar
+            .setContentTitle(isAr ? "مترجم الألعاب" : "Game Translator")
+            .setContentText(isAr
                 ? "✏️ للتحديد  |  ضغطتين/ضغطة طويلة = اللغة"
                 : "✏️ to select  |  Double-tap/Hold = language")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
@@ -1777,452 +1693,4 @@ public class FloatingTranslatorService extends Service {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build();
     }
-
-    // ════════════════════════════════════════════════════════════════
-    // OcrEngineManager — sleep/wake failover queue
-    // Only one engine is active at a time. Others sleep (not initialized).
-    // On failure the current engine sleeps and the next one wakes.
-    // ════════════════════════════════════════════════════════════════
-
-    private OcrEngineManager ocrEngineManager;
-
-    /** Call once in initOCR() — replaces direct recognizer fields */
-    private void initOcrEngineManager() {
-        List<OcrEngineManager.OcrEngine> engines = new ArrayList<>();
-
-        // Engine 0 — Latin (fast, default)
-        engines.add(new OcrEngineManager.OcrEngine("Latin-Fast") {
-            private TextRecognizer rec;
-            @Override public void wake() {
-                if (rec == null)
-                    rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            }
-            @Override public void sleep() {
-                if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; }
-            }
-            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
-                if (rec == null) { cb.onFailure("Latin rec is null"); return; }
-                rec.process(InputImage.fromBitmap(bmp, 0))
-                    .addOnSuccessListener(r -> cb.onSuccess(r.getText().trim()))
-                    .addOnFailureListener(e -> cb.onFailure(e.getMessage()));
-            }
-        });
-
-        // Engine 1 — Japanese/CJK (accurate for JA/KO/ZH)
-        engines.add(new OcrEngineManager.OcrEngine("Japanese-CJK") {
-            private TextRecognizer rec;
-            @Override public void wake() {
-                if (rec == null)
-                    rec = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
-            }
-            @Override public void sleep() {
-                if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; }
-            }
-            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
-                if (rec == null) { cb.onFailure("JA rec is null"); return; }
-                rec.process(InputImage.fromBitmap(bmp, 0))
-                    .addOnSuccessListener(r -> cb.onSuccess(r.getText().trim()))
-                    .addOnFailureListener(e -> cb.onFailure(e.getMessage()));
-            }
-        });
-
-        // Engine 2 — Latin with preprocessing (game text / low contrast)
-        engines.add(new OcrEngineManager.OcrEngine("Latin-Preprocessed") {
-            private TextRecognizer rec;
-            @Override public void wake() {
-                if (rec == null)
-                    rec = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
-            }
-            @Override public void sleep() {
-                if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; }
-            }
-            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
-                if (rec == null) { cb.onFailure("Preprocessed rec is null"); return; }
-                Bitmap processed = ImagePreprocessor.process(bmp);
-                rec.process(InputImage.fromBitmap(processed, 0))
-                    .addOnSuccessListener(r -> {
-                        if (processed != bmp && !processed.isRecycled()) processed.recycle();
-                        cb.onSuccess(r.getText().trim());
-                    })
-                    .addOnFailureListener(e -> {
-                        if (processed != bmp && !processed.isRecycled()) processed.recycle();
-                        cb.onFailure(e.getMessage());
-                    });
-            }
-        });
-
-        // Engine 3 — Japanese with preprocessing (JA game text fallback)
-        engines.add(new OcrEngineManager.OcrEngine("Japanese-Preprocessed") {
-            private TextRecognizer rec;
-            @Override public void wake() {
-                if (rec == null)
-                    rec = TextRecognition.getClient(new JapaneseTextRecognizerOptions.Builder().build());
-            }
-            @Override public void sleep() {
-                if (rec != null) { try { rec.close(); } catch (Exception ignored) {} rec = null; }
-            }
-            @Override public void recognize(Bitmap bmp, OcrEngineManager.OcrCallback cb) {
-                if (rec == null) { cb.onFailure("JA preprocessed rec is null"); return; }
-                Bitmap processed = ImagePreprocessor.process(bmp);
-                rec.process(InputImage.fromBitmap(processed, 0))
-                    .addOnSuccessListener(r -> {
-                        if (processed != bmp && !processed.isRecycled()) processed.recycle();
-                        cb.onSuccess(r.getText().trim());
-                    })
-                    .addOnFailureListener(e -> {
-                        if (processed != bmp && !processed.isRecycled()) processed.recycle();
-                        cb.onFailure(e.getMessage());
-                    });
-            }
-        });
-
-        ocrEngineManager = new OcrEngineManager(engines);
-        ocrEngineManager.wakeActive(); // wake engine 0 only
-    }
-
-    private void closeOcrEngineManager() {
-        if (ocrEngineManager != null) { ocrEngineManager.closeAll(); ocrEngineManager = null; }
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // TranslationEngineManager — Google → degraded fallback
-    // ════════════════════════════════════════════════════════════════
-
-    private TranslationEngineManager translationEngineManager;
-
-    private void initTranslationEngineManager() {
-        List<TranslationEngineManager.TranslationEngine> engines = new ArrayList<>();
-
-        // Engine 0 — Google Translate (unofficial endpoint)
-        engines.add(new TranslationEngineManager.TranslationEngine("Google-Translate") {
-            @Override
-            public String translate(String text, String from, String to) throws Exception {
-                return googleTranslate(text, from, to);
-            }
-            @Override public boolean requiresNetwork() { return true; }
-        });
-
-        // Engine 1 — Show original (offline degraded mode)
-        engines.add(new TranslationEngineManager.TranslationEngine("Offline-Passthrough") {
-            @Override
-            public String translate(String text, String from, String to) throws Exception {
-                return text; // return original — user sees OCR result at minimum
-            }
-            @Override public boolean requiresNetwork() { return false; }
-        });
-
-        translationEngineManager = new TranslationEngineManager(engines);
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // OcrEngineManager — inner static class
-    // ════════════════════════════════════════════════════════════════
-
-    private static class OcrEngineManager {
-        interface OcrCallback {
-            void onSuccess(String text);
-            void onFailure(String reason);
-        }
-
-        static abstract class OcrEngine {
-            final String name;
-            boolean sleeping = true;
-            int     failCount = 0;
-            long    lastFailAt = 0;
-            static final long COOLDOWN_MS = 30_000;
-            static final int  MAX_FAILS   = 2;
-
-            OcrEngine(String name) { this.name = name; }
-            abstract void wake();
-            abstract void sleep();
-            abstract void recognize(Bitmap bmp, OcrCallback cb);
-
-            boolean isCoolingDown() {
-                return failCount >= MAX_FAILS
-                    && (System.currentTimeMillis() - lastFailAt) < COOLDOWN_MS;
-            }
-            void recordFail() {
-                failCount++;
-                lastFailAt = System.currentTimeMillis();
-            }
-            void resetFails() { failCount = 0; }
-        }
-
-        private final List<OcrEngine> engines;
-        private final AtomicInteger   activeIdx = new AtomicInteger(0);
-
-        OcrEngineManager(List<OcrEngine> engines) { this.engines = engines; }
-
-        void wakeActive() {
-            OcrEngine e = engines.get(activeIdx.get());
-            if (e.sleeping) { e.wake(); e.sleeping = false; }
-            Log.d("GT-EngMgr", "OCR wake → [" + e.name + "]");
-        }
-
-        /** Run OCR with automatic failover. cb runs on whatever thread ML Kit uses. */
-        void runOcr(Bitmap bmp, String preferLang, OcrCallback finalCb) {
-            tryEngine(bmp, preferLang, finalCb, 0);
-        }
-
-        private void tryEngine(Bitmap bmp, String preferLang, OcrCallback finalCb, int attempt) {
-            // Pick best starting engine based on language preference
-            int startIdx = pickStartIdx(preferLang);
-            int idx = (startIdx + attempt) % engines.size();
-
-            // Skip engines in cooldown (max 1 full pass)
-            int skips = 0;
-            while (engines.get(idx).isCoolingDown() && skips < engines.size()) {
-                Log.d("GT-EngMgr", "OCR engine [" + engines.get(idx).name + "] cooling down, skip");
-                idx = (idx + 1) % engines.size();
-                skips++;
-            }
-            if (skips == engines.size()) {
-                Log.e("GT-EngMgr", "All OCR engines cooling down — giving up");
-                finalCb.onFailure("all_engines_cooling");
-                return;
-            }
-
-            final int fIdx = idx;
-            OcrEngine eng = engines.get(fIdx);
-
-            // Wake this engine if sleeping
-            if (eng.sleeping) { eng.wake(); eng.sleeping = false; }
-            activeIdx.set(fIdx);
-            Log.d("GT-EngMgr", "OCR attempt=" + attempt + " engine=[" + eng.name + "]");
-
-            eng.recognize(bmp, new OcrCallback() {
-                @Override public void onSuccess(String text) {
-                    if (text.isEmpty()) {
-                        // Empty result = soft fail → try next engine
-                        Log.w("GT-EngMgr", "OCR [" + eng.name + "] returned empty → failover");
-                        eng.recordFail();
-                        sleepEngine(fIdx);
-                        if (attempt + 1 < engines.size())
-                            tryEngine(bmp, preferLang, finalCb, attempt + 1);
-                        else
-                            finalCb.onSuccess(""); // all engines empty
-                    } else {
-                        eng.resetFails();
-                        Log.d("GT-EngMgr", "OCR [" + eng.name + "] success: " + text.length() + " chars");
-                        finalCb.onSuccess(text);
-                    }
-                }
-                @Override public void onFailure(String reason) {
-                    Log.e("GT-EngMgr", "OCR [" + eng.name + "] fail: " + reason);
-                    eng.recordFail();
-                    sleepEngine(fIdx);
-                    if (attempt + 1 < engines.size())
-                        tryEngine(bmp, preferLang, finalCb, attempt + 1);
-                    else
-                        finalCb.onFailure("all_engines_failed");
-                }
-            });
-        }
-
-        private int pickStartIdx(String lang) {
-            if (lang != null && (lang.equals("ja") || lang.equals("ko") || lang.startsWith("zh")))
-                return 1; // start with Japanese engine
-            return 0; // start with Latin engine
-        }
-
-        private void sleepEngine(int idx) {
-            OcrEngine e = engines.get(idx);
-            if (!e.sleeping) { e.sleep(); e.sleeping = true; }
-            Log.d("GT-EngMgr", "OCR sleep ← [" + e.name + "]  fails=" + e.failCount);
-        }
-
-        /** Attempt to recover sleeping engines after cooldown expires */
-        void tryRecoverEngines() {
-            for (OcrEngine e : engines) {
-                if (e.sleeping && !e.isCoolingDown() && e.failCount > 0) {
-                    e.resetFails();
-                    Log.d("GT-EngMgr", "OCR engine [" + e.name + "] recovered (cooldown elapsed)");
-                }
-            }
-            // Ensure at least one engine is awake
-            boolean anyAwake = false;
-            for (OcrEngine e : engines) if (!e.sleeping) { anyAwake = true; break; }
-            if (!anyAwake) wakeActive();
-        }
-
-        void closeAll() {
-            for (OcrEngine e : engines) { try { e.sleep(); } catch (Exception ignored) {} }
-            Log.d("GT-EngMgr", "All OCR engines closed");
-        }
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // TranslationEngineManager — inner static class
-    // ════════════════════════════════════════════════════════════════
-
-    private static class TranslationEngineManager {
-        interface TranslationCallback {
-            void onSuccess(String result, String engineName);
-            void onFailure(String reason);
-        }
-
-        static abstract class TranslationEngine {
-            final String name;
-            int  failCount  = 0;
-            long lastFailAt = 0;
-            static final long COOLDOWN_MS = 60_000;
-            static final int  MAX_FAILS   = 2;
-
-            TranslationEngine(String name) { this.name = name; }
-            abstract String translate(String text, String from, String to) throws Exception;
-            abstract boolean requiresNetwork();
-
-            boolean isCoolingDown() {
-                return failCount >= MAX_FAILS
-                    && (System.currentTimeMillis() - lastFailAt) < COOLDOWN_MS;
-            }
-            void recordFail() { failCount++; lastFailAt = System.currentTimeMillis(); }
-            void resetFails() { failCount = 0; }
-        }
-
-        private final List<TranslationEngine> engines;
-
-        TranslationEngineManager(List<TranslationEngine> engines) { this.engines = engines; }
-
-        void translate(String text, String from, String to, boolean netAvailable,
-                       ExecutorService exec, TranslationCallback cb) {
-            if (exec == null || exec.isShutdown()) { cb.onFailure("executor_dead"); return; }
-            exec.submit(() -> {
-                for (int i = 0; i < engines.size(); i++) {
-                    TranslationEngine eng = engines.get(i);
-                    if (eng.isCoolingDown()) {
-                        Log.d("GT-TrMgr", "Translation [" + eng.name + "] cooling, skip");
-                        continue;
-                    }
-                    if (eng.requiresNetwork() && !netAvailable) {
-                        Log.d("GT-TrMgr", "Translation [" + eng.name + "] skipped (no network)");
-                        continue;
-                    }
-                    try {
-                        Log.d("GT-TrMgr", "Translate attempt engine=[" + eng.name + "]");
-                        String result = eng.translate(text, from, to);
-                        if (result == null || result.isEmpty()) throw new Exception("empty result");
-                        eng.resetFails();
-                        Log.d("GT-TrMgr", "Translate [" + eng.name + "] success");
-                        cb.onSuccess(result, eng.name);
-                        return;
-                    } catch (Exception e) {
-                        Log.w("GT-TrMgr", "Translate [" + eng.name + "] fail: " + e.getMessage());
-                        eng.recordFail();
-                    }
-                }
-                cb.onFailure("all_translation_engines_failed");
-            });
-        }
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // ImagePreprocessor — improves OCR on game text
-    // grayscale → contrast boost → sharpen → adaptive threshold
-    // Lightweight: no OpenCV, pure Android Canvas/ColorMatrix
-    // ════════════════════════════════════════════════════════════════
-
-    private static class ImagePreprocessor {
-
-        static Bitmap process(Bitmap src) {
-            if (src == null || src.isRecycled()) return src;
-            try {
-                // Step 1: scale up small crops for better OCR accuracy
-                Bitmap scaled = src;
-                if (src.getWidth() < 200 || src.getHeight() < 60) {
-                    float factor = Math.max(200f / src.getWidth(), 60f / src.getHeight());
-                    int w = Math.round(src.getWidth() * factor);
-                    int h = Math.round(src.getHeight() * factor);
-                    scaled = Bitmap.createScaledBitmap(src, w, h, true);
-                }
-
-                // Step 2: grayscale + contrast boost
-                Bitmap gray = Bitmap.createBitmap(scaled.getWidth(), scaled.getHeight(),
-                    Bitmap.Config.ARGB_8888);
-                Canvas c = new Canvas(gray);
-                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-
-                ColorMatrix cm = new ColorMatrix();
-                cm.setSaturation(0f); // grayscale
-                // Contrast boost: scale channels by 1.6, shift by -80
-                float[] contrast = {
-                    1.6f, 0,    0,    0, -80,
-                    0,    1.6f, 0,    0, -80,
-                    0,    0,    1.6f, 0, -80,
-                    0,    0,    0,    1,   0
-                };
-                ColorMatrix contrastCm = new ColorMatrix(contrast);
-                cm.postConcat(contrastCm);
-                p.setColorFilter(new ColorMatrixColorFilter(cm));
-                c.drawBitmap(scaled, 0, 0, p);
-                if (scaled != src) scaled.recycle();
-
-                // Step 3: sharpen via convolution approximation using overlay
-                // (simple unsharp-mask: original - blur + original)
-                Bitmap sharp = applySharpen(gray);
-                if (sharp != gray) gray.recycle();
-
-                Log.d("GT-Prep", "preprocessed " + src.getWidth() + "x" + src.getHeight()
-                    + " → " + sharp.getWidth() + "x" + sharp.getHeight());
-                return sharp;
-
-            } catch (Exception e) {
-                Log.w("GT-Prep", "preprocess failed: " + e.getMessage());
-                return src; // fallback to original
-            }
-        }
-
-        /** Approximate sharpening: blend original with high-pass */
-        private static Bitmap applySharpen(Bitmap src) {
-            try {
-                Bitmap out = Bitmap.createBitmap(src.getWidth(), src.getHeight(),
-                    Bitmap.Config.ARGB_8888);
-                Canvas c = new Canvas(out);
-                // Draw base
-                c.drawBitmap(src, 0, 0, null);
-                // High-pass overlay: draw again with lighten blend at partial alpha
-                Paint p = new Paint();
-                p.setAlpha(60); // subtle sharpen
-                // Use ColorMatrix to invert for unsharp mask effect
-                ColorMatrix inv = new ColorMatrix(new float[]{
-                    -1, 0,  0,  0, 255,
-                     0,-1,  0,  0, 255,
-                     0, 0, -1,  0, 255,
-                     0, 0,  0,  1,   0
-                });
-                p.setColorFilter(new ColorMatrixColorFilter(inv));
-                p.setXfermode(new android.graphics.PorterDuffXfermode(
-                    android.graphics.PorterDuff.Mode.SCREEN));
-                c.drawBitmap(src, 0, 0, p);
-                return out;
-            } catch (Exception e) {
-                return src;
-            }
-        }
-    }
-
-
-    // ════════════════════════════════════════════════════════════════
-    // Debug crop saver
-    // ════════════════════════════════════════════════════════════════
-
-    private void saveDebugCrop(Bitmap bmp) {
-        if (!DEBUG_CROP || bmp == null || bmp.isRecycled()) return;
-        try {
-            File dir = getExternalFilesDir(null);
-            if (dir == null) return;
-            File f = new File(dir, "gt_debug_crop_" + System.currentTimeMillis() + ".png");
-            try (FileOutputStream fos = new FileOutputStream(f)) {
-                bmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
-            }
-            Log.d(TAG, "DEBUG crop saved → " + f.getAbsolutePath());
-        } catch (Exception e) {
-            Log.w(TAG, "DEBUG crop save failed: " + e.getMessage());
-        }
-    }
-
 }
