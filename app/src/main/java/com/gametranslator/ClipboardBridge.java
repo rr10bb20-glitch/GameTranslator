@@ -3,98 +3,110 @@ package com.gametranslator;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.SharedPreferences;
-import android.webkit.JavascriptInterface;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+import android.widget.Toast;
 
-public class ClipboardBridge {
+/**
+ * ClipboardBridge — pastes the latest translation result to the system clipboard.
+ *
+ * Features:
+ *   • Debounced: rapid successive calls within DEBOUNCE_MS are collapsed into one.
+ *   • Always runs on the main thread (required by ClipboardManager).
+ *   • Optional user-visible Toast confirmation.
+ *   • Zero memory leaks — no static Context references.
+ *
+ * Usage (from any thread):
+ *   ClipboardBridge.copy(context, "translated text", true);
+ */
+public final class ClipboardBridge {
 
-    private static final String PREFS_NAME = "translator_prefs";
-    private static final String KEY_FROM_LANG = "from_lang";
-    private static final String KEY_TO_LANG   = "to_lang";
+    private static final String TAG         = "GT-Clipboard";
+    private static final long   DEBOUNCE_MS = 400;
 
-    private final Context context;
+    private static final Handler H = new Handler(Looper.getMainLooper());
 
-    public ClipboardBridge(Context context) {
-        this.context = context;
+    // Pending copy runnable — cancelled on rapid successive calls
+    private static Runnable pendingCopy;
+
+    private ClipboardBridge() {}
+
+    // ── Public API ────────────────────────────────────────────────────
+
+    /**
+     * Copy text to clipboard (debounced).
+     *
+     * @param context     Application or Service context (not Activity)
+     * @param text        Text to copy — ignored if null/empty
+     * @param showToast   Whether to show a brief confirmation toast
+     */
+    public static void copy(Context context, String text, boolean showToast) {
+        if (text == null || text.isEmpty()) return;
+
+        // Cancel pending copy from rapid previous call
+        if (pendingCopy != null) H.removeCallbacks(pendingCopy);
+
+        final Context appCtx = context.getApplicationContext();
+        pendingCopy = () -> {
+            pendingCopy = null;
+            doCopy(appCtx, text, showToast);
+        };
+        H.postDelayed(pendingCopy, DEBOUNCE_MS);
     }
 
-    // ── Clipboard ──
+    /**
+     * Copy immediately — no debounce. Must be called on main thread.
+     */
+    public static void copyNow(Context context, String text) {
+        doCopy(context.getApplicationContext(), text, false);
+    }
 
-    @JavascriptInterface
-    public String getText() {
+    /** Cancel any pending debounced copy. */
+    public static void cancel() {
+        if (pendingCopy != null) {
+            H.removeCallbacks(pendingCopy);
+            pendingCopy = null;
+        }
+    }
+
+    // ── Internal ──────────────────────────────────────────────────────
+
+    private static void doCopy(Context ctx, String text, boolean showToast) {
         try {
-            ClipboardManager cm = (ClipboardManager)
-                context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null && cm.hasPrimaryClip()) {
-                ClipData.Item item = cm.getPrimaryClip().getItemAt(0);
-                CharSequence text = item.getText();
-                if (text != null) return text.toString();
+            ClipboardManager cm =
+                (ClipboardManager) ctx.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null) { Log.w(TAG, "ClipboardManager null"); return; }
+            cm.setPrimaryClip(ClipData.newPlainText("translation", text));
+            Log.d(TAG, "copied " + text.length() + " chars");
+            if (showToast) {
+                boolean ar = java.util.Locale.getDefault().getLanguage().equals("ar");
+                Toast.makeText(ctx,
+                    ar ? "تم النسخ إلى الحافظة" : "Copied to clipboard",
+                    Toast.LENGTH_SHORT).show();
             }
-        } catch (Exception ignored) {}
-        return "";
+        } catch (Exception e) {
+            Log.e(TAG, "copy failed: " + e.getMessage());
+        }
     }
 
-    @JavascriptInterface
-    public void setText(String text) {
+    // ── Read last copied text ─────────────────────────────────────────
+
+    /**
+     * Returns the current primary clip text, or empty string if unavailable.
+     * Must be called on main thread on API 29+.
+     */
+    public static String read(Context context) {
         try {
-            ClipboardManager cm = (ClipboardManager)
-                context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (cm != null) {
-                ClipData clip = ClipData.newPlainText("translation", text);
-                cm.setPrimaryClip(clip);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    // ── إعدادات اللغة — يحفظها الـ HTML، يقرأها الـ Service ──
-
-    @JavascriptInterface
-    public void saveLanguages(String fromLang, String toLang) {
-        try {
-            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            prefs.edit()
-                 .putString(KEY_FROM_LANG, fromLang)
-                 .putString(KEY_TO_LANG, toLang)
-                 .apply();
-        } catch (Exception ignored) {}
-    }
-
-    @JavascriptInterface
-    public String getFromLang() {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        return prefs.getString(KEY_FROM_LANG, "auto");
-    }
-
-    @JavascriptInterface
-    public String getToLang() {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        return prefs.getString(KEY_TO_LANG, "ar");
-    }
-
-    // ── static helper — يستخدمه الـ Service مباشرة بدون WebView ──
-
-    public static String readFromLang(Context ctx) {
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        return prefs.getString(KEY_FROM_LANG, "auto");
-    }
-
-    public static String readToLang(Context ctx) {
-        SharedPreferences prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        return prefs.getString(KEY_TO_LANG, "ar");
-    }
-
-    // يتحقق إذا اختار المستخدم لغة من قبل
-    public static boolean hasLanguageSaved(Context ctx) {
-        return ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                  .contains(KEY_TO_LANG);
-    }
-
-    // يستخدمه الـ Service بعد اختيار اللغة من القائمة العائمة
-    public static void saveLang(Context ctx, String fromLang, String toLang) {
-        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-           .edit()
-           .putString(KEY_FROM_LANG, fromLang)
-           .putString(KEY_TO_LANG, toLang)
-           .apply();
+            ClipboardManager cm =
+                (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm == null || !cm.hasPrimaryClip()) return "";
+            ClipData.Item item = cm.getPrimaryClip().getItemAt(0);
+            CharSequence seq = item.getText();
+            return seq != null ? seq.toString() : "";
+        } catch (Exception e) {
+            Log.w(TAG, "read failed: " + e.getMessage());
+            return "";
+        }
     }
 }
