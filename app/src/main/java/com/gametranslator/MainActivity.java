@@ -35,20 +35,6 @@ import androidx.core.content.ContextCompat;
 
 import java.util.Locale;
 
-/**
- * MainActivity — v2 (Production)
- *
- * Changes vs v1:
- * ─ Handler now uses Looper.getMainLooper() to avoid deprecated no-arg constructor
- * ─ startForegroundService / startService wrapped in a helper with try-catch
- * ─ finish() delayed via mainHandler — explicit reference prevents Handler leak
- * ─ onBackPressed() replaced with onBackPressedDispatcher for API 33+ compatibility
- * ─ onDestroy() clears handler callbacks to prevent rare post-destroy callback fire
- * ─ mpManager null-check before createScreenCaptureIntent()
- * ─ pickLang() dialog: window attributes checked before setLayout() to avoid NPE
- * ─ Language list divider no longer relies on last-element code match (was fragile)
- * ─ enable()/status() null-guard already existed — kept as-is
- */
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG           = "GT_Main";
@@ -58,7 +44,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_LANG_TO   = "lang_to";
     private static final int    REQ_NOTIF     = 1001;
 
-    // ── Colors ────────────────────────────────────────────────────
     private static final int C_BG   = 0xFF060D1A;
     private static final int C_CARD = 0xFF0D1B2E;
     private static final int C_BLUE = 0xFF3D8BFF;
@@ -67,7 +52,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int C_GREEN= 0xFF00E676;
     private static final int C_DIV  = 0xFF1A2A44;
 
-    // ── Languages ─────────────────────────────────────────────────
     private static final String[][] LANGS = {
         {"auto","Auto Detect / تلقائي"},
         {"ar","العربية"},
@@ -101,17 +85,14 @@ public class MainActivity extends AppCompatActivity {
         {"uk","Українська"},
     };
 
-    // ── UI ─────────────────────────────────────────────────────────
     private boolean           isAr;
     private TextView          tvFromVal, tvToVal, tvStatus;
     private Button            btnStart;
     private SharedPreferences prefs;
     private MediaProjectionManager mpManager;
 
-    // Use explicit Looper to avoid deprecated Handler() constructor
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    // ── Launchers ──────────────────────────────────────────────────
     private final ActivityResultLauncher<Intent> overlayLauncher =
         registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), r -> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.canDrawOverlays(this))
@@ -127,7 +108,6 @@ public class MainActivity extends AppCompatActivity {
             } else { status(str("cap_denied")); enable(true); }
         });
 
-    // ═════════════════════════════════════════════════════════════
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -153,7 +133,6 @@ public class MainActivity extends AppCompatActivity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
         root.setPadding(dp(24), dp(48), dp(24), dp(48));
 
-        // ── Title ─────────────────────────────────────────────────
         TextView title = new TextView(this);
         title.setText(str("app_name"));
         title.setTextColor(C_BLUE);
@@ -169,7 +148,6 @@ public class MainActivity extends AppCompatActivity {
         sub.setPadding(0, dp(4), 0, dp(36));
         root.addView(sub);
 
-        // ── Language Card ─────────────────────────────────────────
         root.addView(label(str("lang_settings")));
 
         LinearLayout langCard = card();
@@ -188,7 +166,6 @@ public class MainActivity extends AppCompatActivity {
         root.addView(langCard);
         root.addView(spacer(dp(28)));
 
-        // ── Start Card ────────────────────────────────────────────
         root.addView(label(str("start_section")));
 
         LinearLayout startCard = card();
@@ -227,7 +204,6 @@ public class MainActivity extends AppCompatActivity {
         root.addView(startCard);
         root.addView(spacer(dp(28)));
 
-        // ── How-to Card ───────────────────────────────────────────
         root.addView(label(str("howto_section")));
         LinearLayout howtoCard = card();
 
@@ -275,7 +251,6 @@ public class MainActivity extends AppCompatActivity {
         setContentView(sv);
     }
 
-    /** True if FloatingTranslatorService is currently running. */
     @SuppressWarnings("deprecation")
     private boolean isServiceRunning() {
         try {
@@ -302,7 +277,6 @@ public class MainActivity extends AppCompatActivity {
         Window win = d.getWindow();
         if (win != null) {
             win.setBackgroundDrawableResource(android.R.color.transparent);
-            // Soft input adjustment — prevents dialog jumping when keyboard appears
             win.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
             win.setLayout(
                 (int)(getResources().getDisplayMetrics().widthPixels  * 0.90f),
@@ -378,7 +352,6 @@ public class MainActivity extends AppCompatActivity {
 
             box.addView(row);
 
-            // Divider between rows — use index comparison, not code matching (was fragile)
             if (idx < totalLangs) {
                 android.view.View dv = new android.view.View(this);
                 dv.setBackgroundColor(C_DIV);
@@ -402,7 +375,6 @@ public class MainActivity extends AppCompatActivity {
     private void startTranslator() {
         enable(false);
 
-        // ── CASE 1: Service already running → just push lang update, no re-capture ──
         if (isServiceRunning()) {
             status(str("already_running"));
             Intent svc = new Intent(this, FloatingTranslatorService.class);
@@ -418,19 +390,30 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // ── CASE 2: Service NOT running → full permission flow ──────────────────────
-        // Reset grant flag so we re-acquire a fresh MediaProjection token
-        // (old token is dead when the service process was killed)
         prefs.edit().putBoolean(KEY_GRANTED, false).apply();
         btnStart.setText(str("btn_start"));
-
         status(str("checking"));
 
+        // ── Notifications Permission ──────────────────────────────────────────────
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED) {
-                ActivityCompat.requestPermissions(this,
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+                showPermExplanation(
+                    isAr ? "صلاحية الإشعارات" : "Notifications Permission",
+                    isAr
+                        ? "يحتاج التطبيق إذناً لعرض إشعار يُبقيه يعمل في الخلفية أثناء الترجمة.\n\n" +
+                          "• مطلوب من نظام Android للخدمات التي تعمل في الخلفية.\n" +
+                          "• لا نرسل إشعارات تسويقية أو غير مرغوب فيها.\n" +
+                          "• التطبيق لا يجمع بياناتك الشخصية أو يتجسس عليك.\n" +
+                          "• يمكنك رفض هذا الإذن."
+                        : "The app needs a notification to keep the translator running in the background.\n\n" +
+                          "• Required by Android for background services.\n" +
+                          "• No marketing or spam notifications.\n" +
+                          "• No personal data is collected.\n" +
+                          "• You can deny this permission.",
+                    () -> ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF)
+                );
                 return;
             }
         }
@@ -441,17 +424,33 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int req, @NonNull String[] p, @NonNull int[] r) {
         super.onRequestPermissionsResult(req, p, r);
         if (req == REQ_NOTIF) {
-            // Whether granted or denied, proceed — notification permission is non-blocking
             checkOverlay();
         }
     }
 
     private void checkOverlay() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            status(str("overlay_req"));
-            overlayLauncher.launch(new Intent(
-                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:" + getPackageName())));
+            // ── Overlay Permission ────────────────────────────────────────────────
+            showPermExplanation(
+                isAr ? "صلاحية العرض فوق التطبيقات" : "Display Over Apps Permission",
+                isAr
+                    ? "يحتاج التطبيق إذناً لعرض نافذة الترجمة العائمة فوق التطبيقات الأخرى.\n\n" +
+                      "• تُستخدم فقط لعرض نتيجة الترجمة على شاشتك.\n" +
+                      "• لا تُستخدم للتجسس أو مراقبة نشاطك.\n" +
+                      "• التطبيق لا يجمع بياناتك الشخصية.\n" +
+                      "• يمكنك رفض هذا الإذن من إعدادات النظام."
+                    : "The app needs permission to show the floating translation window over other apps.\n\n" +
+                      "• Used only to display the translation result on your screen.\n" +
+                      "• Not used to spy on or monitor your activity.\n" +
+                      "• No personal data is collected.\n" +
+                      "• You can deny this from system settings.",
+                () -> {
+                    status(str("overlay_req"));
+                    overlayLauncher.launch(new Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:" + getPackageName())));
+                }
+            );
         } else {
             requestCapture();
         }
@@ -463,14 +462,31 @@ public class MainActivity extends AppCompatActivity {
             enable(true);
             return;
         }
-        status(str("cap_req"));
-        try {
-            captureLauncher.launch(mpManager.createScreenCaptureIntent());
-        } catch (Exception e) {
-            Log.e(TAG, "capture intent: " + e.getMessage(), e);
-            status("❌ " + e.getMessage());
-            enable(true);
-        }
+        // ── Screen Capture Permission ─────────────────────────────────────────────
+        showPermExplanation(
+            isAr ? "صلاحية تسجيل الشاشة" : "Screen Capture Permission",
+            isAr
+                ? "يحتاج التطبيق إذناً لقراءة محتوى الشاشة بهدف استخراج النصوص وترجمتها.\n\n" +
+                  "• يُستخدم فقط لقراءة النصوص الظاهرة على الشاشة وترجمتها.\n" +
+                  "• لا يتم تسجيل أي فيديو أو حفظ لقطات شاشة.\n" +
+                  "• التطبيق لا يجمع بياناتك الشخصية أو يتجسس عليك.\n" +
+                  "• يمكنك رفض هذا الإذن وسيتوقف التطبيق عن العمل."
+                : "The app needs permission to read your screen content in order to extract and translate text.\n\n" +
+                  "• Used only to read visible text on screen and translate it.\n" +
+                  "• No video is recorded and no screenshots are saved.\n" +
+                  "• No personal data is collected or transmitted.\n" +
+                  "• You can deny this permission and the app will stop.",
+            () -> {
+                status(str("cap_req"));
+                try {
+                    captureLauncher.launch(mpManager.createScreenCaptureIntent());
+                } catch (Exception e) {
+                    Log.e(TAG, "capture intent: " + e.getMessage(), e);
+                    status("❌ " + e.getMessage());
+                    enable(true);
+                }
+            }
+        );
     }
 
     private void launch(int rc, Intent data) {
@@ -485,7 +501,6 @@ public class MainActivity extends AppCompatActivity {
             else
                 startService(svc);
             status(str("launched"));
-            // Use named handler reference — prevents anonymous Handler leak warning
             mainHandler.postDelayed(this::finish, 1_000);
         } catch (Exception e) {
             Log.e(TAG, "start svc: " + e.getMessage(), e);
@@ -524,7 +539,6 @@ public class MainActivity extends AppCompatActivity {
         return tv;
     }
 
-    /** Builds a language row and stores the value TextView in setTag(). */
     private LinearLayout langRow(String rowLabel, String currentVal) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -532,7 +546,7 @@ public class MainActivity extends AppCompatActivity {
         row.setPadding(dp(8), dp(14), dp(8), dp(14));
 
         TextView icon = new TextView(this);
-        icon.setText("\uD83C\uDF10"); // 🌐
+        icon.setText("\uD83C\uDF10");
         icon.setTextSize(18f);
         icon.setPadding(0, 0, dp(12), 0);
         row.addView(icon);
@@ -557,7 +571,7 @@ public class MainActivity extends AppCompatActivity {
         row.addView(info);
 
         TextView arrow = new TextView(this);
-        arrow.setText("\u203A"); // ›
+        arrow.setText("\u203A");
         arrow.setTextColor(C_BLUE);
         arrow.setTextSize(22f);
         row.addView(arrow);
@@ -602,8 +616,21 @@ public class MainActivity extends AppCompatActivity {
         return code;
     }
 
+    // ─── Permission Explanation Dialog ───────────────────────────────────────────
+    private void showPermExplanation(String title, String message, Runnable onConfirm) {
+        new android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setCancelable(false)
+            .setPositiveButton(isAr ? "موافق، متابعة" : "OK, Continue",
+                (d, w) -> onConfirm.run())
+            .setNegativeButton(isAr ? "رفض" : "Deny",
+                (d, w) -> { d.dismiss(); enable(true); status(""); })
+            .show();
+    }
+
     // ═════════════════════════════════════════════════════════════
-    // Strings — Arabic / English based on device locale
+    // Strings
     // ═════════════════════════════════════════════════════════════
 
     private String str(String key) {
