@@ -280,7 +280,9 @@ public class FloatingTranslatorService extends Service {
         }
 
         requestBatteryExemptionOnce();
-        return START_REDELIVER_INTENT;
+        // START_STICKY not START_REDELIVER_INTENT — avoids redelivering stale mp_data
+        // Intent which causes getMediaProjection() SecurityException on service restart.
+        return START_STICKY;
     }
 
     @Override
@@ -343,10 +345,13 @@ public class FloatingTranslatorService extends Service {
 
     private void enterEngineSleep() {
         if (destroyed || ocrBusy.get() || translating.get()) { scheduleEngineSleep(); return; }
-        if (captureEngine != null) captureEngine.releaseVD();
+        // sleepVD releases ImageReader (~20 MB) but keeps VD handle alive.
+        // Keeping VD alive avoids createVirtualDisplay() on resume → no Samsung SecurityException
+        // when screen is in landscape. VD with null surface = zero GPU/battery cost.
+        if (captureEngine != null) captureEngine.sleepVD();
         if (executor != null && !executor.isShutdown()) { executor.shutdown(); executor = null; }
         sleepR = null;
-        Log.d(TAG, "engine sleeping");
+        Log.d(TAG, "engine sleeping — ImageReader freed, VD handle alive");
     }
 
     private void wakeEngine() {
