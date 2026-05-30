@@ -243,33 +243,60 @@ public class CaptureEngine {
     private void acquireFrameInternal(int screenW, int screenH, int dpi, FrameCallback cb) {
         Log.d(TAG, "acquireFrameInternal: target=" + screenW + "x" + screenH + " dpi=" + dpi);
 
-        // ── Step 1: Ensure VD is built with correct dimensions ────────
+        // ── Step 1: Decide if VD rebuild is needed ────────────────────
+        // DPI excluded intentionally — doesn't change on orientation flip,
+        // including it caused spurious rebuilds on Samsung devices.
         boolean needRebuild;
         synchronized (this) {
             needRebuild = (vd == null)
-                || imageReader == null
+                || (imageReader == null)
                 || (currentW != screenW)
-                || (currentH != screenH)
-                || (currentDpi != dpi);
+                || (currentH != screenH);
         }
+
+        // captureW/H = dims we actually use when reading the frame.
+        // Normally == screenW/H, but falls back to old VD dims if rebuild fails.
+        int captureW = screenW;
+        int captureH = screenH;
 
         if (needRebuild) {
             Log.d(TAG, "VD rebuild triggered — was=" + currentW + "x" + currentH
-                + " dpi=" + currentDpi + " → new=" + screenW + "x" + screenH + " dpi=" + dpi);
+                + " → new=" + screenW + "x" + screenH);
 
             String buildError = buildVirtualDisplay(screenW, screenH, dpi);
+
             if (buildError != null) {
-                Log.e(TAG, "buildVD failed: " + buildError);
-                cb.onError(buildError);
-                return;
+                // Check whether the OLD VD is still alive (resize may have kept it)
+                int fallbackW, fallbackH;
+                boolean hasFallback;
+                synchronized (this) {
+                    hasFallback = (vd != null && imageReader != null && currentW > 0);
+                    fallbackW   = currentW;
+                    fallbackH   = currentH;
+                }
+
+                if (hasFallback) {
+                    // Old VD alive — capture at its dims instead of showing error.
+                    // computeCrop handles the scale difference, OCR still works.
+                    Log.w(TAG, "buildVD failed (" + buildError + ") — old VD alive, "
+                        + "capturing at fallback dims " + fallbackW + "x" + fallbackH);
+                    captureW = fallbackW;
+                    captureH = fallbackH;
+                } else {
+                    // No VD at all — nothing to capture.
+                    Log.e(TAG, "buildVD failed and no fallback VD: " + buildError);
+                    cb.onError(buildError);
+                    return;
+                }
             }
         }
 
         // ── Step 2: Acquire frame using latch (primary strategy) ──────
         long timeoutMs = freshVD ? VD_WARMUP_TIMEOUT_MS : FRAME_TIMEOUT_MS;
-        Log.d(TAG, "waiting for frame: timeout=" + timeoutMs + "ms freshVD=" + freshVD);
+        Log.d(TAG, "waiting for frame: timeout=" + timeoutMs + "ms freshVD=" + freshVD
+            + " captureW=" + captureW + " captureH=" + captureH);
 
-        Bitmap bmp = acquireWithLatch(screenW, screenH, timeoutMs);
+        Bitmap bmp = acquireWithLatch(captureW, captureH, timeoutMs);
 
         if (bmp != null) {
             freshVD = false;
@@ -280,7 +307,7 @@ public class CaptureEngine {
 
         // ── Step 3: Polling fallback ───────────────────────────────────
         Log.w(TAG, "latch strategy returned null — falling back to polling");
-        bmp = acquireWithPolling(screenW, screenH);
+        bmp = acquireWithPolling(captureW, captureH);
 
         if (bmp != null) {
             freshVD = false;
@@ -290,7 +317,7 @@ public class CaptureEngine {
         }
 
         // ── Step 4: All strategies exhausted ─────────────────────────
-        Log.e(TAG, "acquireFrame: ALL strategies failed for " + screenW + "x" + screenH);
+        Log.e(TAG, "acquireFrame: ALL strategies failed for " + captureW + "x" + captureH);
         cb.onError("frame_unavailable");
     }
 
@@ -301,10 +328,13 @@ public class CaptureEngine {
     /**
      * Build or resize a VirtualDisplay + ImageReader.
      *
-     * Strategy:
-     *   1. If VD already exists → try vd.resize() + new ImageReader (avoids touching mp token).
-     *      This is the Samsung fix: orientation change no longer calls createVirtualDisplay().
-     *   2. If resize fails or VD doesn't exist → full rebuild via createVirtualDisplay().
+     * Strategy A — resize():
+     *   If VD already exists, resize it without touching the mp token.
+     *   On failure, the OLD VD is intentionally preserved so acquireFrameInternal
+     *   can fall back to capturing at the old dimensions instead of showing an error.
+     *
+     * Strategy B — full createVirtualDisplay():
+     *   Used when no VD exists, or when resize crashes hard (not SecurityException).
      *
      * @return null on success, or error reason string on failure.
      */
@@ -314,16 +344,16 @@ public class CaptureEngine {
             return "no_projection";
         }
 
-        // ── Strategy 1: resize existing VD (no mp touch) ─────────────
+        // ── Strategy A: resize existing VD (no mp token touch) ───────
         if (vd != null && imageReader != null) {
-            Log.d(TAG, "buildVD: trying resize " + currentW + "x" + currentH
+            Log.d(TAG, "buildVD: resize attempt " + currentW + "x" + currentH
                     + " → " + w + "x" + h + " dpi=" + dpi);
             try {
                 ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
                 vd.resize(w, h, dpi);
                 vd.setSurface(newReader.getSurface());
 
-                // close old reader AFTER new surface is attached
+                // Close old reader AFTER new surface is attached
                 try { imageReader.close(); } catch (Exception ignored) {}
                 imageReader = newReader;
 
@@ -333,19 +363,26 @@ public class CaptureEngine {
                 freshVD    = true;
 
                 Log.d(TAG, "buildVD: resize OK — mp token untouched");
-                return null; // success
+                return null;
+
+            } catch (SecurityException se) {
+                // Samsung invalidated token — but OLD vd/imageReader are still set.
+                // DO NOT call releaseVD() here — caller (acquireFrameInternal) will
+                // detect that vd != null and capture at old dims as a fallback.
+                Log.w(TAG, "buildVD: resize SecurityException — old VD preserved for fallback: "
+                        + se.getMessage());
+                return "vd_security_exception";
 
             } catch (Exception e) {
-                // resize failed — fall through to full rebuild
+                // Unexpected error — fall through to full rebuild
                 Log.w(TAG, "buildVD: resize failed (" + e.getMessage() + ") — full rebuild");
                 releaseVD();
             }
         } else {
-            // no existing VD — start clean
             releaseVD();
         }
 
-        // ── Strategy 2: full rebuild via createVirtualDisplay ─────────
+        // ── Strategy B: full createVirtualDisplay ─────────────────────
         Log.d(TAG, "buildVD: full rebuild " + w + "x" + h + " dpi=" + dpi);
         try {
             imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
@@ -356,8 +393,8 @@ public class CaptureEngine {
                 w, h, dpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),
-                null,   // DisplayCallback — not needed
-                null);  // Handler — null = same thread as mp
+                null,
+                null);
 
             currentW   = w;
             currentH   = h;
@@ -366,7 +403,7 @@ public class CaptureEngine {
 
             Log.d(TAG, "VD built OK: " + w + "x" + h + " dpi=" + dpi
                 + " freshVD=true warmup=" + VD_WARMUP_TIMEOUT_MS + "ms");
-            return null; // success
+            return null;
 
         } catch (SecurityException se) {
             Log.e(TAG, "buildVD SecurityException (stale token): " + se.getMessage());
