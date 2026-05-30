@@ -140,18 +140,20 @@ public class CaptureEngine {
      * Safe to call multiple times (handles token refresh on MIUI/EMUI).
      */
     public synchronized void setProjection(MediaProjection newMp) {
-        Log.d(TAG, "setProjection — releasing old VD before swap");
+        Log.d(TAG, "setProjection called — releasing VD only (token preserved)");
+        Log.d(TAG, "setProjection: old mp=" + (mp != null ? "exists" : "null")
+            + "  new mp=" + (newMp != null ? "exists" : "null"));
+
         releaseVD();
 
-        if (mp != null) {
-            // Stop old projection — its onStop callback (if any) fires asynchronously
-            // on the Handler thread, which will call releaseVD() again harmlessly.
-            try { mp.stop(); }
-            catch (Exception ignored) {}
-        }
+        // ── لا نستدعي mp.stop() ──────────────────────────────────────────
+        // السبب: mp.stop() يُلغي الـ Token نهائياً.
+        // إذا استُدعيت setProjection() أكثر من مرة (تدوير شاشة / restart)
+        // كان mp.stop() يجبر المستخدم على إعادة منح إذن Screen Capture.
+        // الـ Token القديم يتحرر تلقائياً عند GC — لا حاجة لإيقافه يدوياً.
 
         mp = newMp;
-        Log.d(TAG, "projection=" + (mp != null ? "OK (new token)" : "NULL"));
+        Log.d(TAG, "setProjection: token assigned OK — VD built on next acquireFrame()");
     }
 
     /** @return true if a MediaProjection token is held */
