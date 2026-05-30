@@ -299,22 +299,55 @@ public class CaptureEngine {
     // ─────────────────────────────────────────────────────────────────
 
     /**
-     * Build a fresh VirtualDisplay + ImageReader.
+     * Build or resize a VirtualDisplay + ImageReader.
+     *
+     * Strategy:
+     *   1. If VD already exists → try vd.resize() + new ImageReader (avoids touching mp token).
+     *      This is the Samsung fix: orientation change no longer calls createVirtualDisplay().
+     *   2. If resize fails or VD doesn't exist → full rebuild via createVirtualDisplay().
+     *
      * @return null on success, or error reason string on failure.
      */
     private synchronized String buildVirtualDisplay(int w, int h, int dpi) {
-        // Always start clean
-        releaseVD();
-
         if (mp == null) {
             Log.e(TAG, "buildVD: MediaProjection is null — token not set");
             return "no_projection";
         }
 
+        // ── Strategy 1: resize existing VD (no mp touch) ─────────────
+        if (vd != null && imageReader != null) {
+            Log.d(TAG, "buildVD: trying resize " + currentW + "x" + currentH
+                    + " → " + w + "x" + h + " dpi=" + dpi);
+            try {
+                ImageReader newReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+                vd.resize(w, h, dpi);
+                vd.setSurface(newReader.getSurface());
+
+                // close old reader AFTER new surface is attached
+                try { imageReader.close(); } catch (Exception ignored) {}
+                imageReader = newReader;
+
+                currentW   = w;
+                currentH   = h;
+                currentDpi = dpi;
+                freshVD    = true;
+
+                Log.d(TAG, "buildVD: resize OK — mp token untouched");
+                return null; // success
+
+            } catch (Exception e) {
+                // resize failed — fall through to full rebuild
+                Log.w(TAG, "buildVD: resize failed (" + e.getMessage() + ") — full rebuild");
+                releaseVD();
+            }
+        } else {
+            // no existing VD — start clean
+            releaseVD();
+        }
+
+        // ── Strategy 2: full rebuild via createVirtualDisplay ─────────
+        Log.d(TAG, "buildVD: full rebuild " + w + "x" + h + " dpi=" + dpi);
         try {
-            // ImageReader with 2-buffer depth:
-            //   buffer 0 = being written by VD
-            //   buffer 1 = available to read with acquireLatestImage()
             imageReader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
             Log.d(TAG, "ImageReader created: " + w + "x" + h + " RGBA_8888 maxImages=2");
 
@@ -329,14 +362,13 @@ public class CaptureEngine {
             currentW   = w;
             currentH   = h;
             currentDpi = dpi;
-            freshVD    = true; // triggers longer warmup timeout
+            freshVD    = true;
 
             Log.d(TAG, "VD built OK: " + w + "x" + h + " dpi=" + dpi
                 + " freshVD=true warmup=" + VD_WARMUP_TIMEOUT_MS + "ms");
             return null; // success
 
         } catch (SecurityException se) {
-            // Stale token — most common on MIUI/EMUI after lock screen
             Log.e(TAG, "buildVD SecurityException (stale token): " + se.getMessage());
             releaseVD();
             return "vd_security_exception";
