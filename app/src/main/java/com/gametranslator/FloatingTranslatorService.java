@@ -69,28 +69,6 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * FloatingTranslatorService — v23 (Modular Refactor)
- *
- * What changed from v22:
- *   • CaptureEngine     — owns all MediaProjection / VirtualDisplay / ImageReader logic.
- *                         Fixes wide-screen and high-DPI capture bugs.
- *   • BubbleOverlay     — owns the translation result pill window.
- *   • BitmapPool        — reusable bitmap allocation, reduces GC spikes.
- *   • ClipboardBridge   — debounced clipboard copy (long-press bubble copies text).
- *   • This file now focuses solely on UI orchestration and workflow coordination.
- *   • No static Context, no duplicate code, no pooling bugs.
- *
- * Window layers (TYPE_APPLICATION_OVERLAY):
- *   1. btnView        — language pill  (drag / double-tap = picker)
- *   2. selBtnView     — ✏️ pen button  (tap = toggle, drag = draw stroke)
- *   3. strokeOverlay  — FLAG_NOT_TOUCHABLE canvas (no dim, no rectangle)
- *   4. BubbleOverlay  — compact translation bubble (managed externally)
- *
- * Selection model:
- *   User drags ✏️ across game text → bounding box → OCR → translation → bubble.
- *   Long-press bubble → copies text to clipboard.
- */
 public class FloatingTranslatorService extends Service {
 
     private static final String TAG        = "GT";
@@ -102,26 +80,21 @@ public class FloatingTranslatorService extends Service {
     private static final String KEY_LANG_TO   = "lang_to";
     private static final String KEY_BATTERY_ASKED = "battery_asked";
 
-    // Timing constants
     private static final long LONG_PRESS_MS  = 600;
     private static final long DOUBLE_TAP_MS  = 280;
     private static final long IDLE_SLEEP_MS  = 5_000;
 
-    // UI
     private static final float ALPHA_IDLE = 0.22f;
     private static final float ALPHA_BUSY = 0.95f;
 
-    // OCR guards
     private static final int MIN_STROKE_PX = 30;
     private static final int MIN_CROP_W    = 20;
     private static final int MIN_CROP_H    = 10;
 
     private static final int CACHE_SIZE = 60;
 
-    // Debug: set true to save cropped bitmap for inspection
     private static final boolean DEBUG_CROP = false;
 
-    // ── Supported languages ───────────────────────────────────────────
     private static final String[][] LANGS = {
         {"auto","Auto","?"},
         {"ar","Arabic","AR"},{"en","English","EN"},{"ja","Japanese","JA"},
@@ -154,13 +127,8 @@ public class FloatingTranslatorService extends Service {
         {"so","Somali","SO"},{"ht","Haitian Creole","HC"},
     };
 
-    // ═════════════════════════════════════════════════════════════════
-    // Fields
-    // ═════════════════════════════════════════════════════════════════
-
     private final Handler H = new Handler(Looper.getMainLooper());
 
-    // Core modules
     private CaptureEngine   captureEngine;
     private BubbleOverlay   bubbleOverlay;
     private OcrEngineManager         ocrEngineManager;
@@ -173,7 +141,6 @@ public class FloatingTranslatorService extends Service {
     private SharedPreferences prefs;
     private boolean           isAr;
 
-    // ── Floating UI views ─────────────────────────────────────────────
     private View     btnView;
     private View     selBtnView;
     private View     strokeOverlayView;
@@ -181,7 +148,6 @@ public class FloatingTranslatorService extends Service {
     private WindowManager.LayoutParams btnLP, selBtnLP, strokeLP;
     private TextView tvBtnLabel;
 
-    // ── Service state ─────────────────────────────────────────────────
     private final AtomicBoolean ocrBusy     = new AtomicBoolean(false);
     private final AtomicBoolean translating = new AtomicBoolean(false);
     private volatile boolean    destroyed   = false;
@@ -192,25 +158,17 @@ public class FloatingTranslatorService extends Service {
     private volatile String toLang    = "ar";
     private String          pickerFrom = "auto";
 
-    // ── Network ───────────────────────────────────────────────────────
     private volatile boolean                    netAvailable = true;
     private ConnectivityManager.NetworkCallback netCallback;
     private ConnectivityManager                 cm;
 
-    // ── Tap / dismiss timers ──────────────────────────────────────────
     private Runnable doubleTapCheck;
     private Runnable fadeOutR;
     private Runnable sleepR;
     private int      tapCount = 0;
 
-    // ── Stroke selection ──────────────────────────────────────────────
     private StrokeCanvasView strokeView;
     private float lastStrokeLeft, lastStrokeTop, lastStrokeRight, lastStrokeBottom;
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Lifecycle
-    // ═════════════════════════════════════════════════════════════════
 
     @Override public IBinder onBind(Intent intent) { return null; }
 
@@ -228,7 +186,6 @@ public class FloatingTranslatorService extends Service {
 
         resolveScreenSize();
 
-        // Initialize modular components
         captureEngine            = new CaptureEngine();
         bubbleOverlay            = new BubbleOverlay(this, SW, SH);
         translateCache           = new LruCache<>(CACHE_SIZE);
@@ -263,7 +220,6 @@ public class FloatingTranslatorService extends Service {
             return START_STICKY;
         }
 
-        // ── Apply lang params from MainActivity ───────────────────────
         String lf = intent.getStringExtra("lang_from");
         String lt = intent.getStringExtra("lang_to");
         if (lf != null && !lf.isEmpty()) {
@@ -276,9 +232,6 @@ public class FloatingTranslatorService extends Service {
         }
         H.post(() -> { if (!destroyed && tvBtnLabel != null) tvBtnLabel.setText(shortPair()); });
 
-        // ── Receive MediaProjection token ─────────────────────────────
-        // Always accept a fresh token — MainActivity always requests a new one.
-        // This handles Xiaomi/Honor stale token after lock screen / force-stop.
         if (intent.hasExtra("mp_result_code")) {
             int    rc   = intent.getIntExtra("mp_result_code", -1);
             Intent data = intent.getParcelableExtra("mp_data");
@@ -306,11 +259,18 @@ public class FloatingTranslatorService extends Service {
                             }
                         }, H);
 
-                        // setProjection() releases old VD internally before assigning new mp
                         captureEngine.setProjection(mp);
-                        Log.d(TAG, "MediaProjection (re)set — fresh token");
+                        Log.d(TAG, "MediaProjection (re)set — fresh token assigned to CaptureEngine");
+
+                    } catch (SecurityException se) {
+                        Log.e(TAG, "MediaProjection SecurityException (stale token): " + se.getMessage());
+                        H.post(() -> { if (!destroyed)
+                            toast(isAr
+                                ? "انتهت صلاحية الإذن — أعد فتح التطبيق"
+                                : "Permission expired — reopen the app"); });
+
                     } catch (Exception e) {
-                        Log.e(TAG, "MediaProjection init: " + e.getMessage(), e);
+                        Log.e(TAG, "MediaProjection init failed: " + e.getMessage(), e);
                     }
                 }
             } else {
@@ -332,17 +292,13 @@ public class FloatingTranslatorService extends Service {
         H.removeCallbacksAndMessages(null);
         if (executor != null && !executor.isShutdown()) executor.shutdownNow();
 
-        // Close OCR engines
         if (ocrEngineManager != null) { ocrEngineManager.closeAll(); ocrEngineManager = null; }
         translationEngineManager = null;
 
-        // Release capture resources
         if (captureEngine != null) { captureEngine.release(); captureEngine = null; }
 
-        // Release bubble
         if (bubbleOverlay != null) { bubbleOverlay.detach(); bubbleOverlay = null; }
 
-        // Drain bitmap pool
         BitmapPool.drainPool();
 
         stopNetworkMonitor();
@@ -358,11 +314,6 @@ public class FloatingTranslatorService extends Service {
         tvBtnLabel = null;
         strokeView = null;
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Executor management
-    // ═════════════════════════════════════════════════════════════════
 
     private void rebuildExecutor() {
         if (executor == null || executor.isShutdown()) {
@@ -380,11 +331,6 @@ public class FloatingTranslatorService extends Service {
         catch (RejectedExecutionException e) { Log.e(TAG, "safeSubmit rejected"); }
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Sleep / wake (idle resource management)
-    // ═════════════════════════════════════════════════════════════════
-
     private void scheduleEngineSleep() {
         cancelEngineSleep();
         sleepR = this::enterEngineSleep;
@@ -397,7 +343,6 @@ public class FloatingTranslatorService extends Service {
 
     private void enterEngineSleep() {
         if (destroyed || ocrBusy.get() || translating.get()) { scheduleEngineSleep(); return; }
-        // Release VD (keeps projection token alive for fast resume)
         if (captureEngine != null) captureEngine.releaseVD();
         if (executor != null && !executor.isShutdown()) { executor.shutdown(); executor = null; }
         sleepR = null;
@@ -409,33 +354,20 @@ public class FloatingTranslatorService extends Service {
         rebuildExecutor();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Screen size
-    // ═════════════════════════════════════════════════════════════════
-
     private void resolveScreenSize() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
                 SW = b.width(); SH = b.height();
-                Log.d(TAG, "resolveScreenSize [API30+]: " + SW + "x" + SH);
             } else {
                 DisplayMetrics dm = new DisplayMetrics();
-                //noinspection deprecation
-                wm.getDefaultDisplay().getRealMetrics(dm);   // getRealMetrics > getMetrics for full panel
+                wm.getDefaultDisplay().getRealMetrics(dm);
                 SW = dm.widthPixels; SH = dm.heightPixels;
-                Log.d(TAG, "resolveScreenSize [getRealMetrics]: " + SW + "x" + SH);
             }
         } catch (Exception e) { SW = 1080; SH = 1920; }
         Log.d(TAG, "screen=" + SW + "x" + SH);
     }
 
-    /**
-     * Returns [liveW, liveH] — current physical screen dimensions read live
-     * from WindowManager without mutating SW/SH.
-     * Safe to call from any thread; falls back to SW/SH on error.
-     */
     private int[] liveScreenSize() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -443,19 +375,13 @@ public class FloatingTranslatorService extends Service {
                 return new int[]{ b.width(), b.height() };
             } else {
                 DisplayMetrics dm = new DisplayMetrics();
-                //noinspection deprecation
                 wm.getDefaultDisplay().getRealMetrics(dm);
                 return new int[]{ dm.widthPixels, dm.heightPixels };
             }
         } catch (Exception e) {
-            return new int[]{ SW, SH };   // safe fallback
+            return new int[]{ SW, SH };
         }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Floating language pill
-    // ═════════════════════════════════════════════════════════════════
 
     private void buildButton() {
         FrameLayout root = new FrameLayout(this);
@@ -503,11 +429,6 @@ public class FloatingTranslatorService extends Service {
         scheduleBtnFade();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // ✏️ Pen button
-    // ═════════════════════════════════════════════════════════════════
-
     private void buildSelectionButton() {
         FrameLayout root = new FrameLayout(this);
 
@@ -542,11 +463,6 @@ public class FloatingTranslatorService extends Service {
         selBtnView.setOnTouchListener(new SelBtnTouch());
         safeAddView(selBtnView, selBtnLP);
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // ✏️ Touch — tap = toggle, drag = draw stroke
-    // ═════════════════════════════════════════════════════════════════
 
     private class SelBtnTouch implements View.OnTouchListener {
         private float   rx, ry;
@@ -591,7 +507,6 @@ public class FloatingTranslatorService extends Service {
                         strokeView.addPoint(e.getRawX(), e.getRawY());
                         RectF box = strokeView.getBoundingBox();
                         if (box.width() > MIN_STROKE_PX && box.height() > MIN_STROKE_PX) {
-                            // [FIX-D] Clamp against live screen — not stale SW/SH
                             final int[] liveClamp = liveScreenSize();
                             final int liveW = liveClamp[0];
                             final int liveH = liveClamp[1];
@@ -599,9 +514,6 @@ public class FloatingTranslatorService extends Service {
                             lastStrokeTop    = Math.max(0,     box.top);
                             lastStrokeRight  = Math.min(liveW, box.right);
                             lastStrokeBottom = Math.min(liveH, box.bottom);
-                            Log.d(TAG, "stroke bounds=[" + (int)lastStrokeLeft + ","
-                                + (int)lastStrokeTop + " → " + (int)lastStrokeRight
-                                + "," + (int)lastStrokeBottom + "] live=" + liveW + "x" + liveH);
                             strokeView.triggerConfirm();
                         } else {
                             strokeView.clearStroke();
@@ -620,11 +532,6 @@ public class FloatingTranslatorService extends Service {
             return false;
         }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Selection mode
-    // ═════════════════════════════════════════════════════════════════
 
     private void enterSelectionMode() {
         if (selectionMode || destroyed) return;
@@ -658,11 +565,6 @@ public class FloatingTranslatorService extends Service {
         scheduleEngineSleep();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Stroke overlay — full-screen, FLAG_NOT_TOUCHABLE
-    // ═════════════════════════════════════════════════════════════════
-
     private void buildStrokeOverlay() {
         if (strokeOverlayView != null) { safeRemove(strokeOverlayView); strokeOverlayView = null; strokeView = null; }
 
@@ -674,10 +576,7 @@ public class FloatingTranslatorService extends Service {
             FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         strokeOverlayView = root;
 
-        // [FIX-C] Use live screen size — SW/SH are stale in landscape apps
         final int[] liveStroke = liveScreenSize();
-        Log.d(TAG, "strokeOverlay live=" + liveStroke[0] + "x" + liveStroke[1]
-            + " stored=" + SW + "x" + SH);
 
         strokeLP = new WindowManager.LayoutParams(
             liveStroke[0], liveStroke[1], overlayType(),
@@ -691,11 +590,6 @@ public class FloatingTranslatorService extends Service {
         safeAddView(strokeOverlayView, strokeLP);
         strokeOverlayView.animate().alpha(1f).setDuration(160).start();
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // StrokeCanvasView — freeform pen stroke
-    // ═════════════════════════════════════════════════════════════════
 
     private class StrokeCanvasView extends View {
         private final Path   strokePath   = new Path();
@@ -713,7 +607,7 @@ public class FloatingTranslatorService extends Service {
         StrokeCanvasView(Context ctx) {
             super(ctx);
             setWillNotDraw(false);
-            setLayerType(LAYER_TYPE_SOFTWARE, null); // required for BlurMaskFilter
+            setLayerType(LAYER_TYPE_SOFTWARE, null);
 
             strokePaint.setStyle(Paint.Style.STROKE);
             strokePaint.setStrokeWidth(dp(5));
@@ -755,13 +649,11 @@ public class FloatingTranslatorService extends Service {
             invalidate();
         }
 
-        /** Bounding box with padding for OCR accuracy */
         RectF getBoundingBox() {
             float pad = dp(14);
             return new RectF(minX - pad, minY - pad, maxX + pad, maxY + pad);
         }
 
-        /** Green flash animation then OCR */
         void triggerConfirm() {
             confirmed = true;
             ValueAnimator a = ValueAnimator.ofFloat(0f, 1f, 0.6f, 0f);
@@ -792,11 +684,6 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // OCR pipeline
-    // ═════════════════════════════════════════════════════════════════
-
     private void runOCROnSelection(float sL, float sT, float sR, float sB) {
         wakeEngine();
         if (!ocrBusy.compareAndSet(false, true)) { exitSelectionMode(); return; }
@@ -813,9 +700,6 @@ public class FloatingTranslatorService extends Service {
 
         ocrEngineManager.tryRecoverEngines();
 
-        Log.d(TAG, "OCR start screen=[" + (int)sL + "," + (int)sT
-            + " → " + (int)sR + "," + (int)sB + "]");
-
         H.post(() -> {
             if (destroyed) return;
             if (tvBtnLabel != null) tvBtnLabel.setText("...");
@@ -831,16 +715,10 @@ public class FloatingTranslatorService extends Service {
         safeSubmit(() -> {
             if (destroyed) { ocrBusy.set(false); return; }
 
-            // ── [FIX-B] Resolve live screen size on worker thread ─────
-            // SW/SH are stale after orientation changes; read live values here.
             final int[] live = liveScreenSize();
             final int liveW  = live[0];
             final int liveH  = live[1];
-            Log.d(TAG, "OCR live=" + liveW + "x" + liveH
-                + " stored=" + SW + "x" + SH
-                + (liveW != SW || liveH != SH ? " *** ORIENTATION CHANGE" : ""));
 
-            // ── Capture full frame ────────────────────────────────────
             captureEngine.acquireFrame(liveW, liveH, density, new CaptureEngine.FrameCallback() {
 
                 @Override
@@ -848,11 +726,6 @@ public class FloatingTranslatorService extends Service {
                     H.post(FloatingTranslatorService.this::exitSelectionMode);
 
                     int bW = fullBmp.getWidth(), bH = fullBmp.getHeight();
-                    Log.d(TAG, "BITMAP bmpW=" + bW + " bmpH=" + bH
-                        + " liveW=" + liveW + " liveH=" + liveH
-                        + " scaleX=" + String.format("%.4f", (liveW > 0 ? (float)bW/liveW : 1f))
-                        + " scaleY=" + String.format("%.4f", (liveH > 0 ? (float)bH/liveH : 1f)));
-                    // [FIX-B] Use liveW/liveH — NOT SW/SH — for correct crop mapping
                     int[] crop = CaptureEngine.computeCrop(sL, sT, sR, sB, bW, bH, liveW, liveH,
                         MIN_CROP_W, MIN_CROP_H);
 
@@ -870,7 +743,6 @@ public class FloatingTranslatorService extends Service {
                         return;
                     }
 
-                    // Crop the selection region
                     Bitmap cropped;
                     try {
                         cropped = Bitmap.createBitmap(fullBmp, crop[0], crop[1], crop[2], crop[3]);
@@ -881,16 +753,14 @@ public class FloatingTranslatorService extends Service {
                         H.post(() -> { if (!destroyed) { resetBtn(shortPair()); bubbleOverlay.scheduleDismiss(); } });
                         return;
                     }
-                    BitmapPool.release(fullBmp);  // full bitmap no longer needed
+                    BitmapPool.release(fullBmp);
 
                     saveDebugCrop(cropped);
 
-                    // ── OCR with failover ─────────────────────────────
                     ocrEngineManager.runOcr(cropped, snapFrom, new OcrEngineManager.OcrCallback() {
                         @Override public void onSuccess(String text) {
                             BitmapPool.recycleSafe(cropped);
                             ocrBusy.set(false);
-                            Log.d(TAG, "OCR: [" + text + "]");
                             H.post(() -> { if (!destroyed) resetBtn(shortPair()); });
                             if (!text.isEmpty()) doTranslate(text);
                             else H.post(() -> { if (!destroyed) onNoTextFound(); });
@@ -898,7 +768,6 @@ public class FloatingTranslatorService extends Service {
                         @Override public void onFailure(String reason) {
                             BitmapPool.recycleSafe(cropped);
                             ocrBusy.set(false);
-                            Log.e(TAG, "OCR failed: " + reason);
                             H.post(() -> { if (!destroyed) { resetBtn(shortPair()); onNoTextFound(); } });
                         }
                     });
@@ -907,16 +776,54 @@ public class FloatingTranslatorService extends Service {
                 @Override
                 public void onError(String reason) {
                     ocrBusy.set(false);
-                    Log.e(TAG, "capture error: " + reason);
-                    H.post(() -> { if (!destroyed) {
+                    Log.e(TAG, "capture error: reason=" + reason);
+
+                    final String userMsg;
+                    final boolean needsReopen;
+
+                    switch (reason) {
+                        case "no_projection":
+                        case "vd_security_exception":
+                            userMsg     = isAr
+                                ? "انتهت صلاحية الإذن — افتح التطبيق وامنح الإذن مجدداً"
+                                : "Permission expired — reopen the app to grant access";
+                            needsReopen = true;
+                            break;
+                        case "acquire_busy":
+                            userMsg     = null;
+                            needsReopen = false;
+                            break;
+                        case "frame_unavailable":
+                            userMsg     = isAr
+                                ? "فشل الالتقاط — حاول مجدداً"
+                                : "Capture failed — try again";
+                            needsReopen = false;
+                            break;
+                        default:
+                            userMsg     = isAr
+                                ? "خطأ في الالتقاط: " + reason
+                                : "Capture error: " + reason;
+                            needsReopen = false;
+                            break;
+                    }
+
+                    H.post(() -> {
+                        if (destroyed) return;
                         exitSelectionMode();
                         resetBtn(shortPair());
-                        bubbleOverlay.update(
-                            isAr ? "فشل الالتقاط — حاول مجدداً" : "Capture failed — try again",
-                            pairText(), false);
+                        if (userMsg == null) return;
+                        bubbleOverlay.update(userMsg, pairText(), false);
                         bubbleOverlay.show();
                         bubbleOverlay.scheduleDismiss();
-                    }});
+                        if (needsReopen) {
+                            H.postDelayed(() -> {
+                                if (!destroyed)
+                                    toast(isAr
+                                        ? "افتح التطبيق الرئيسي لتجديد إذن الشاشة"
+                                        : "Open the main app to refresh screen permission");
+                            }, 1_500);
+                        }
+                    });
                 }
             });
         });
@@ -930,17 +837,11 @@ public class FloatingTranslatorService extends Service {
         scheduleEngineSleep();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Translation pipeline
-    // ═════════════════════════════════════════════════════════════════
-
     private void doTranslate(String text) {
         if (!translating.compareAndSet(false, true)) return;
         cancelEngineSleep();
         bubbleOverlay.cancelDismiss();
 
-        // Cache check
         String cacheKey = fromLang + "|" + toLang + "|" + text;
         String cached   = translateCache.get(cacheKey);
         if (cached != null) {
@@ -957,7 +858,6 @@ public class FloatingTranslatorService extends Service {
             bubbleOverlay.show();
         });
 
-        // Truncate very long strings to prevent timeout
         String input = text.length() > 600
             ? text.substring(0, text.offsetByCodePoints(0,
                 Math.min(600, text.codePointCount(0, text.length()))))
@@ -990,7 +890,6 @@ public class FloatingTranslatorService extends Service {
                 }
                 @Override public void onFailure(String reason) {
                     translating.set(false);
-                    Log.e(TAG, "translate all failed: " + reason);
                     H.post(() -> { if (!destroyed) {
                         resetBtn(shortPair());
                         bubbleOverlay.update(text, "⚠ " + pairText(), false);
@@ -1011,11 +910,6 @@ public class FloatingTranslatorService extends Service {
         bubbleOverlay.scheduleDismiss();
         scheduleEngineSleep();
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Main button touch — drag / single / double-tap / long-press
-    // ═════════════════════════════════════════════════════════════════
 
     private class BtnTouch implements View.OnTouchListener {
         private int     ix, iy;
@@ -1086,11 +980,6 @@ public class FloatingTranslatorService extends Service {
         openPicker();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Language picker
-    // ═════════════════════════════════════════════════════════════════
-
     interface LangCb { void pick(String code); }
 
     private void openPicker() {
@@ -1121,7 +1010,6 @@ public class FloatingTranslatorService extends Service {
         root.setBackground(bg);
         root.setElevation(dp(16));
 
-        // Title row
         LinearLayout tr = new LinearLayout(this);
         tr.setOrientation(LinearLayout.HORIZONTAL);
         tr.setGravity(Gravity.CENTER_VERTICAL);
@@ -1199,11 +1087,6 @@ public class FloatingTranslatorService extends Service {
         if (pickerView != null) { safeRemove(pickerView); pickerView = null; }
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Google Translate (unofficial endpoint — personal/dev use only)
-    // ═════════════════════════════════════════════════════════════════
-
     private String googleTranslate(String text, String from, String to) throws Exception {
         String urlStr = "https://translate.googleapis.com/translate_a/single"
             + "?client=gtx&sl=" + (from.equals("auto") ? "auto" : from)
@@ -1238,11 +1121,6 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Network monitor
-    // ═════════════════════════════════════════════════════════════════
-
     private void startNetworkMonitor() {
         cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
         if (cm == null) return;
@@ -1275,11 +1153,6 @@ public class FloatingTranslatorService extends Service {
             return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
         } catch (Exception e) { return true; }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // OCR engine manager
-    // ═════════════════════════════════════════════════════════════════
 
     private void initOcrEngines() {
         List<OcrEngineManager.OcrEngine> engines = new ArrayList<>();
@@ -1350,11 +1223,6 @@ public class FloatingTranslatorService extends Service {
         ocrEngineManager.wakeActive();
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Translation engine manager
-    // ═════════════════════════════════════════════════════════════════
-
     private void initTranslationEngines() {
         List<TranslationEngineManager.TranslationEngine> engines = new ArrayList<>();
 
@@ -1372,11 +1240,6 @@ public class FloatingTranslatorService extends Service {
 
         translationEngineManager = new TranslationEngineManager(engines);
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // OcrEngineManager (inner static — no outer class reference)
-    // ═════════════════════════════════════════════════════════════════
 
     private static class OcrEngineManager {
         interface OcrCallback {
@@ -1413,7 +1276,6 @@ public class FloatingTranslatorService extends Service {
         void wakeActive() {
             OcrEngine e = engines.get(activeIdx.get());
             if (e.sleeping) { e.wake(); e.sleeping = false; }
-            Log.d("GT-OCR", "wake → [" + e.name + "]");
         }
 
         void runOcr(Bitmap bmp, String preferLang, OcrCallback finalCb) {
@@ -1437,7 +1299,6 @@ public class FloatingTranslatorService extends Service {
             OcrEngine eng  = engines.get(fIdx);
             if (eng.sleeping) { eng.wake(); eng.sleeping = false; }
             activeIdx.set(fIdx);
-            Log.d("GT-OCR", "try[" + attempt + "] engine=" + eng.name);
 
             eng.recognize(bmp, new OcrCallback() {
                 @Override public void onSuccess(String text) {
@@ -1454,7 +1315,6 @@ public class FloatingTranslatorService extends Service {
                     }
                 }
                 @Override public void onFailure(String reason) {
-                    Log.e("GT-OCR", "[" + eng.name + "] fail: " + reason);
                     eng.recordFail();
                     sleepEngine(fIdx);
                     if (attempt + 1 < engines.size())
@@ -1489,11 +1349,6 @@ public class FloatingTranslatorService extends Service {
             for (OcrEngine e : engines) try { e.sleep(); } catch (Exception ignored) {}
         }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // TranslationEngineManager (inner static)
-    // ═════════════════════════════════════════════════════════════════
 
     private static class TranslationEngineManager {
         interface TranslationCallback {
@@ -1537,7 +1392,6 @@ public class FloatingTranslatorService extends Service {
                         cb.onSuccess(result, eng.name);
                         return;
                     } catch (Exception e) {
-                        Log.w("GT-Tr", "[" + eng.name + "] fail: " + e.getMessage());
                         eng.recordFail();
                     }
                 }
@@ -1546,16 +1400,10 @@ public class FloatingTranslatorService extends Service {
         }
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // ImagePreprocessor (inner static — no context needed)
-    // ═════════════════════════════════════════════════════════════════
-
     static class ImagePreprocessor {
         static Bitmap process(Bitmap src) {
             if (src == null || src.isRecycled()) return src;
             try {
-                // Scale up small crops for better OCR
                 Bitmap scaled = src;
                 if (src.getWidth() < 200 || src.getHeight() < 60) {
                     float f = Math.max(200f / src.getWidth(), 60f / src.getHeight());
@@ -1563,7 +1411,6 @@ public class FloatingTranslatorService extends Service {
                         Math.round(src.getWidth() * f), Math.round(src.getHeight() * f), true);
                 }
 
-                // Grayscale + contrast boost
                 Bitmap gray = Bitmap.createBitmap(scaled.getWidth(), scaled.getHeight(),
                     Bitmap.Config.ARGB_8888);
                 Canvas c = new Canvas(gray);
@@ -1580,12 +1427,10 @@ public class FloatingTranslatorService extends Service {
                 c.drawBitmap(scaled, 0, 0, p);
                 if (scaled != src) scaled.recycle();
 
-                // Sharpen
                 Bitmap sharp = applySharpen(gray);
                 if (sharp != gray) gray.recycle();
                 return sharp;
             } catch (Exception e) {
-                Log.w("GT-Prep", "preprocess failed: " + e.getMessage());
                 return src;
             }
         }
@@ -1609,11 +1454,6 @@ public class FloatingTranslatorService extends Service {
             } catch (Exception e) { return src; }
         }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Helpers
-    // ═════════════════════════════════════════════════════════════════
 
     private String pairText()  { return abbr(fromLang) + " → " + abbr(toLang); }
     private String shortPair() { return abbr(fromLang) + "→" + abbr(toLang); }
@@ -1692,11 +1532,6 @@ public class FloatingTranslatorService extends Service {
         }, 3_000);
     }
 
-
-    // ═════════════════════════════════════════════════════════════════
-    // Debug crop save
-    // ═════════════════════════════════════════════════════════════════
-
     private void saveDebugCrop(Bitmap bmp) {
         if (!DEBUG_CROP || bmp == null || bmp.isRecycled()) return;
         try {
@@ -1706,14 +1541,8 @@ public class FloatingTranslatorService extends Service {
             try (FileOutputStream fos = new FileOutputStream(f)) {
                 bmp.compress(Bitmap.CompressFormat.PNG, 100, fos);
             }
-            Log.d(TAG, "DEBUG crop → " + f.getAbsolutePath());
         } catch (Exception e) { Log.w(TAG, "DEBUG crop save: " + e.getMessage()); }
     }
-
-
-    // ═════════════════════════════════════════════════════════════════
-    // Notification
-    // ═════════════════════════════════════════════════════════════════
 
     private void createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
